@@ -1,0 +1,10 @@
+.DS_Store
+*.log
+node_modules/
+
+/* reference captures: too large for the repo */
+*.webm
+*.mp4
+
+/* agent scratch: clips, extracted script copies, chunk staging */
+.qwen/tmp/
