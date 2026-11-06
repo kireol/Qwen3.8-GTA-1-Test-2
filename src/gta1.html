@@ -681,6 +681,10 @@ function texFrom(canvas,srgb,srgb2){
   t.anisotropy=4;t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping;t.needsUpdate=true;
   return t;
 }
+/* TEX.* entries are canvases: every GPU map must go through spr() so each sheet is
+   uploaded once and every material sees a real THREE.Texture (r128 reads map.matrix). */
+var SPR={};
+function spr(k){return SPR[k]||(SPR[k]=texFrom(TEX[k]));}
 
 /* ------------------------------------------------------ audio (all synth) */
 var SND=(function(){
@@ -928,11 +932,11 @@ Builder.prototype.extrudeP=function(pts0,y0,pts1,y1,uvr,cb,ct,opt){
     var mx=(a[0]+b[0])*0.5-cx,mz=(a[1]+b[1])*0.5-cz;
     if(nx*mx+nz*mz<0){
       nx=-nx;nz=-nz;
-      this.tri(a[0],y0,a[1], b[0],y0,b[1], b2,y1,b2[1], uvr[0],uvr[1],uvr[2],uvr[1],uvr[2],uvr[3],cb,cb,ct,nx,0,nz);
-      this.tri(a[0],y0,a[1], b2,y1,b2[1], a2,y1,a2[1], uvr[0],uvr[1],uvr[2],uvr[3],uvr[0],uvr[3],cb,ct,ct,nx,0,nz);
+      this.tri(a[0],y0,a[1], b[0],y0,b[1], b2[0],y1,b2[1], uvr[0],uvr[1],uvr[2],uvr[1],uvr[2],uvr[3],cb,cb,ct,nx,0,nz);
+      this.tri(a[0],y0,a[1], b2[0],y1,b2[1], a2[0],y1,a2[1], uvr[0],uvr[1],uvr[2],uvr[3],uvr[0],uvr[3],cb,ct,ct,nx,0,nz);
     }else{
-      this.tri(b[0],y0,b[1], a[0],y0,a[1], a2,y1,a2[1], uvr[0],uvr[1],uvr[2],uvr[1],uvr[2],uvr[3],cb,cb,ct,nx,0,nz);
-      this.tri(b[0],y0,b[1], a2,y1,a2[1], b2,y1,b2[1], uvr[0],uvr[1],uvr[2],uvr[3],uvr[0],uvr[3],cb,ct,ct,nx,0,nz);
+      this.tri(b[0],y0,b[1], a[0],y0,a[1], a2[0],y1,a2[1], uvr[0],uvr[1],uvr[2],uvr[1],uvr[2],uvr[3],cb,cb,ct,nx,0,nz);
+      this.tri(b[0],y0,b[1], a2[0],y1,a2[1], b2[0],y1,b2[1], uvr[0],uvr[1],uvr[2],uvr[3],uvr[0],uvr[3],cb,ct,ct,nx,0,nz);
     }
   }
   this.fan(pts1,y1,uvr,ct,true);
@@ -1094,15 +1098,16 @@ function initGL(){
     side:THREE.DoubleSide,alphaTest:0.5});
   waterTex=atlasTileTex(T.WATER);
   matWater=new THREE.MeshLambertMaterial({map:waterTex,vertexColors:THREE.VertexColors});
-  matAO=new THREE.MeshBasicMaterial({map:TEX.shadow,transparent:true,opacity:0.9,
+  matAO=new THREE.MeshBasicMaterial({map:spr('shadow'),transparent:true,opacity:0.9,
     depthWrite:false});
-  matHalo=new THREE.MeshBasicMaterial({map:TEX.smoke,transparent:true,depthWrite:false,
+  matHalo=new THREE.MeshBasicMaterial({map:spr('smoke'),transparent:true,depthWrite:false,
     blending:THREE.AdditiveBlending,side:THREE.DoubleSide,color:0xffffff});
-  matGlow=new THREE.MeshBasicMaterial({map:TEX.dot,transparent:true,depthWrite:false,
+  matGlow=new THREE.MeshBasicMaterial({map:spr('dot'),transparent:true,depthWrite:false,
     blending:THREE.AdditiveBlending,side:THREE.DoubleSide});
   matTracer=new THREE.MeshBasicMaterial({color:0xfff3b0,transparent:true,opacity:0.9,
     blending:THREE.AdditiveBlending,depthWrite:false});
   OV.width=innerWidth;OV.height=innerHeight;
+  initLights();
   addEventListener('resize',onResize);
   onResize();
 }
@@ -1558,7 +1563,7 @@ function buildCity(ti){
   CITY.theme=ti;CITY.marks=[];CITY.plots=[];CITY.spawn=[];CITY.glow=[];
   CITY.C=new Colliders(24);
   /* keep actors on the island: walls just inside the drawn kerb skirt */
-  var EB=CFG.R0-3.2,EX=CFG.WX+3.2,EZ=CFG.WZ+3.2,EO=4.4;
+  var EB=CFG.R0-3.2,EX=CFG.WX+3.2,EZ=CFG.WZ+3.2;
   CITY.C.add(EB-1.2,EB-1.2,EB,EZ+1.2,3.2,'wall');
   CITY.C.add(EX,EB-1.2,EX+1.2,EZ+1.2,3.2,'wall');
   CITY.C.add(EB-1.2,EZ,EX+1.2,EZ+1.2,3.2,'wall');
@@ -1626,7 +1631,7 @@ function treeAt(x,z,rng){
   gcyl(x,z,y+h*0.30,h*0.26,rc*0.68,8,c1,cmix(c1,WHITE,0.22),tileUV(T.LEAF),true);
   /* cut-out silhouette boards so the crown is not a polygon ball */
   useCut(x,z);
-  var e=tileUV(T.LEAF),cs=[c1,cmix(c1,col(0x1c2a14),0.35)];
+  var e=tileUV(T.LEAF),cg=cmix(c1,col(0x1c2a14),0.35),cs=[cg,cg,c1,c1];
   for(var i=0;i<3;i++){
     var a=rng.f()*TAU,dx=Math.cos(a)*rc*1.28,dz=Math.sin(a)*rc*1.28,yy=LOT_Y+h*0.52;
     gqn(x-dx,yy,z-dz,x+dx,yy,z+dz,x+dx,yy+h*0.62,z+dz,x-dx,yy+h*0.62,z-dz,e,cs,0,0.4,0.9);
@@ -1780,7 +1785,7 @@ function dumpsterAt(x,z,face,rng){
 }
 function containerAt(x,z,yaw,rng,i){
   var cols=[0xb2492e,0x2f6b86,0x3d7a4a,0x8a6b25,0x6b4a7a,0x8f8f86,0xa8522a];
-  var c=cols[(i===undefined?rng.int(0,cols.length-1):i)%cols.length];
+  var c=col(cols[(i===undefined?rng.int(0,cols.length-1):i)%cols.length]);
   var L=6.06,W=2.44,H=2.6;
   var along=Math.abs(Math.cos(yaw))>0.7;
   var hx=along?L*0.5:W*0.5,hz=along?W*0.5:L*0.5;
@@ -2516,7 +2521,7 @@ function lotGarage(L,rng){
   roofKit(x0,z0,x1,z1,top,rng,true);
   useProp((x0+x1)*0.5,(z0+z1)*0.5);
   for(i=0;i<Math.floor((x1-x0)/2.9);i++)
-    flat(x0+1.2+i*2.9,z0+2.4,x0+1.2+i*2.9,z1-2.4,LOT_Y+0,top+0.013,col(0xf0efe4),T.WHITE);
+    flat(x0+1.2+i*2.9,z0+2.4,x0+1.2+i*2.9+0.06,z1-2.4,top+0.013,col(0xf0efe4),T.WHITE);
   var rn=Math.floor((x1-x0)/2.9);
   for(i=0;i<rn;i++)
     flat(x0+1.2+i*2.9+0.06,z0+2.4,x0+1.2+i*2.9+2.78,z0+2.46,top+0.013,col(0xf0efe4),T.WHITE),
@@ -3080,7 +3085,7 @@ function dynMats(){
   MAT.gold=new THREE.MeshLambertMaterial({color:0xffd24a,emissive:0x5a3d00,
     vertexColors:THREE.VertexColors});
   MAT.bag=mk(0xc9a24a);
-  MAT.shadow=new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(TEX.shadow),
+  MAT.shadow=new THREE.MeshBasicMaterial({map:spr('shadow'),
     transparent:true,depthWrite:false,opacity:0.82});
 }
 var GEO={veh:{},ped:{},ply:null,plane:null,case1:null};
@@ -3527,7 +3532,7 @@ function PtPool(cap,tex,add){
   g.setAttribute('aS',new THREE.BufferAttribute(ss,1));
   g.setAttribute('aA',new THREE.BufferAttribute(as,1));
   var mat=new THREE.ShaderMaterial({
-    uniforms:{uMap:{value:new THREE.CanvasTexture(tex)},uPx:{value:520}},
+    uniforms:{uMap:{value:tex},uPx:{value:520}},
     vertexShader:PVS,fragmentShader:PFRA,transparent:true,depthWrite:false,
     blending:add?THREE.AdditiveBlending:THREE.NormalBlending});
   var pts=new THREE.Points(g,mat);
@@ -3585,7 +3590,7 @@ function PtPool(cap,tex,add){
    (a shared material cannot fade per-instance opacity). */
 function DecalPool(cap,tex,opacity,y,pr){
   var g=new THREE.PlaneGeometry(1,1);g.rotateX(-Math.PI/2);
-  var mat=new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(tex),
+  var mat=new THREE.MeshBasicMaterial({map:tex,
     transparent:true,opacity:opacity,depthWrite:false,
     polygonOffset:true,polygonOffsetFactor:pr||-4,polygonOffsetUnits:-4});
   var im=new THREE.InstancedMesh(g,mat,cap);
@@ -3636,15 +3641,15 @@ function initFX(){
   var reg=function(name,pool,arr){
     FX[name]=pool;pool.name=name;arr.push(pool);fxRoot.add(pool.obj);
   };
-  reg('fire',  PtPool(240,TEX.fire ,true ),POOL);
-  reg('spark', PtPool(200,TEX.spark,true ),POOL);
-  reg('smoke', PtPool(200,TEX.smoke,false),POOL);
-  reg('dust',  PtPool(160,TEX.dust ,false),POOL);
-  reg('bloodP',PtPool(120,TEX.blood,false),POOL);
-  reg('spray', PtPool(140,TEX.water,true ),POOL);
-  reg('skid',  DecalPool(160,TEX.skid ,0.34,0.045),DECAL);
-  reg('blood', DecalPool(80 ,TEX.blood,0.62 ,0.050),DECAL);
-  reg('oil',   DecalPool(36 ,TEX.skid ,0.50 ,0.060),DECAL);
+  reg('fire',  PtPool(240,spr('fire') ,true ),POOL);
+  reg('spark', PtPool(200,spr('spark'),true ),POOL);
+  reg('smoke', PtPool(200,spr('smoke'),false),POOL);
+  reg('dust',  PtPool(160,spr('dust') ,false),POOL);
+  reg('bloodP',PtPool(120,spr('blood'),false),POOL);
+  reg('spray', PtPool(140,spr('water'),true ),POOL);
+  reg('skid',  DecalPool(160,spr('skid') ,0.34,0.045),DECAL);
+  reg('blood', DecalPool(80 ,spr('blood'),0.62 ,0.050),DECAL);
+  reg('oil',   DecalPool(36 ,spr('skid') ,0.50 ,0.060),DECAL);
 }
 function fxStep(dt){
   var i;
@@ -3925,6 +3930,7 @@ function integrateVeh(v,dt){
   var roll=sgn(fwd)*Math.min(Math.abs(fwd),(u.hb?2.4:0.85)*dt*dead);
   fwd-=roll;
   if(u.thr===0&&Math.abs(fwd)<0.12)fwd=0;
+  u.vx=fwd*f-lat*g;u.vz=fwd*g+lat*f;
   /* Yaw first, then re-decompose the unchanged world velocity: the old
      velocity now points partly sideways, and grip eating that lateral part is
      exactly what produces arcade understeer and handbrake drift.  Heading
@@ -4227,7 +4233,7 @@ function spawnPeds(n){
   for(var t=0;t<n;t++){
     var p=roadSpawnPoint(26,58);
     if(!p)continue;
-    regPed(makePed(rndi(6),rndi(4),rndi(12)),p.x,p.z,Math.random()*TAU);
+    regPed(makePed(rndi(PANTS.length),rndi(SKINS.length),rndi(SHIRTS.length)),p.x,p.z,Math.random()*TAU);
   }
 }
 function spawnParked(){
@@ -4252,7 +4258,7 @@ function spawnSeedPeds(){
     if(s[i].t!=='d')continue;
     var e=s[i];
     if(dist2(e.x,e.z,P.x,P.z)>110)continue;
-    regPed(makePed(rndi(6),rndi(4),rndi(12)),e.x,e.z,Math.random()*TAU);
+    regPed(makePed(rndi(PANTS.length),rndi(SKINS.length),rndi(SHIRTS.length)),e.x,e.z,Math.random()*TAU);
     n++;
   }
 }
@@ -4342,7 +4348,7 @@ function ejectDriver(v){
   var u=v.userData,f=Math.cos(u.a),g=Math.sin(u.a);
   var ex=u.x+g*(u.winr+0.7),ez=u.z-f*(u.winr+0.7);
   if(CITY.C.blocked(ex,ez,1.7,0.2)){ex=u.x-g*(u.winr+0.8);ez=u.z+f*(u.winr+0.8);}
-  var q=regPed(makePed(rndi(6),rndi(4),rndi(12)),ex,ez,u.a+Math.PI);
+  var q=regPed(makePed(rndi(PANTS.length),rndi(SKINS.length),rndi(SHIRTS.length)),ex,ez,u.a+Math.PI);
   q.userData.st='flee';q.userData.flee=14;
   q.userData.tx=u.x;q.userData.tz=u.z;
   crime(1.1);

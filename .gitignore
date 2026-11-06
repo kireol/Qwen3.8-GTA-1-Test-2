@@ -8,3 +8,6 @@ node_modules/
 
 /* agent scratch: clips, extracted script copies, chunk staging */
 .qwen/tmp/
+
+# vendored three.js r128 for the headless harness (fetch from the cdnjs URL in src/gta1.html)
+tests/harness/three128.js
