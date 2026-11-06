@@ -1557,6 +1557,12 @@ function buildCity(ti){
   if(!worldRoot){worldRoot=new THREE.Group();scene.add(worldRoot);}
   CITY.theme=ti;CITY.marks=[];CITY.plots=[];CITY.spawn=[];CITY.glow=[];
   CITY.C=new Colliders(24);
+  /* keep actors on the island: walls just inside the drawn kerb skirt */
+  var EB=CFG.R0-3.2,EX=CFG.WX+3.2,EZ=CFG.WZ+3.2,EO=4.4;
+  CITY.C.add(EB-1.2,EB-1.2,EB,EZ+1.2,3.2,'wall');
+  CITY.C.add(EX,EB-1.2,EX+1.2,EZ+1.2,3.2,'wall');
+  CITY.C.add(EB-1.2,EZ,EX+1.2,EZ+1.2,3.2,'wall');
+  CITY.C.add(EB-1.2,EB-1.2,EX+1.2,EB,3.2,'wall');
   clearWorld();
   TB={};
   pickKinds(ti);
@@ -4289,7 +4295,7 @@ function footMove(dt){
       gz=(kd('up')?1:0)-(kd('down')?1:0),
       m=Math.sqrt(gx*gx+gz*gz),run=kd('run'),sp=run?6.1:3.35;
   if(m>0){gx/=m;gz/=m;P.a=angLerp(P.a,Math.atan2(gz,gx),Math.min(1,dt*14));}
-  else{gx=P.vx;gz=P.vz;}
+  else{gx=0;gz=0;}/* no input: velocity is the decaying knockback only */
   P.vx=gx*sp+P.ix;P.vz=gz*sp+P.iz;
   P.ix*=Math.exp(-5.5*dt);P.iz*=Math.exp(-5.5*dt);
   P.x+=P.vx*dt;P.z+=P.vz*dt;
