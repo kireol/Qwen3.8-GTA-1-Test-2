@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>GRAND THEFT AUTO</title>
+<title>METRO MAYHEM</title>
 <style>
   html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}
   body{font-family:"Arial Narrow",Arial,Helvetica,sans-serif;color:#fff;
@@ -25,7 +25,7 @@
 <body>
 <canvas id="gl"></canvas>
 <canvas id="ov"></canvas>
-<div id="boot"><div class="lg">GTA</div><div class="sub">GRAND THEFT AUTO</div>
+<div id="boot"><div class="lg">MM</div><div class="sub">METRO MAYHEM</div>
 <div class="bar"><i id="bl"></i></div><div class="msg" id="bm">BOOTING</div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -33,7 +33,7 @@
 "use strict";
 (function(){
 /* =====================================================================
-   GRAND THEFT AUTO — single-file web remake
+   METRO MAYHEM — single-file web remake
    Everything (geometry, textures, audio) is generated at runtime.
    Only external dependency: three.js r128 (cdnjs), loaded above.
    ===================================================================== */
@@ -640,7 +640,7 @@ paintTile(T.CARGO,function(g,S){
   g.fillStyle='rgba(0,0,0,.12)';for(var x=0;x<S;x+=24)g.fillRect(x,0,10,S);
   g.strokeStyle='rgba(60,58,52,.6)';g.lineWidth=4;g.strokeRect(3,3,S-6,S-6);
   g.fillStyle='#8a3a2a';g.font='bold 30px Arial';g.textAlign='center';g.fillText('BANK',S/2,S*0.45);
-  g.fillText('OF LIBERTY',S/2,S*0.62);g.textAlign='start';
+  g.fillText('OF MERIDIAN',S/2,S*0.62);g.textAlign='start';
 });
 paintTile(T.WATERTOWER,function(g,S){
   g.fillStyle='#7d6a52';g.fillRect(0,0,S,S);
@@ -1053,7 +1053,16 @@ var CITY={};
 var CFG={
   BLOCK:46, ROAD:13, SW:3.6, FLOOR:3.4,
   NX:11, NZ:7, MAXB:40,
-  FOV:66, PITCH:62, DIST:52
+  FOV:66,                 /* attract-mode orbit only; the play view is ortho */
+  /* The one zoom knob: metres of world across the screen.  A plan view only
+     shows roofs once half the screen height reaches the first lot line,
+     CFG.LOT0 = 10.1 m from a street centreline, so VIEWW > 2*LOT0*w/h, i.e.
+     > 36 at 16:9.  46 keeps ~10 m of block on every side of the street while
+     still drawing the player ~18 px tall at 1280 px wide. */
+  VIEWW:46,
+  /* Eye height is not framing: an ortho plan view ignores height, so this only
+     has to clear the near plane above the tallest roof (13 * FLOOR = 44.2). */
+  CAMH:90
 };
 CFG.STRIDE=CFG.BLOCK+CFG.ROAD;                 /* 59 between street centres */
 CFG.R0=-CFG.ROAD/2; CFG.R1=CFG.ROAD/2;         /* road band, street-local */
@@ -1070,20 +1079,42 @@ CFG.LOTW=CFG.LOT1-CFG.LOT0;                                 /* 38.8 */
 CFG.TX=function(x){return clamp(Math.floor((x-CFG.R0)/CFG.STRIDE),0,CFG.NX-1);};
 CFG.TZ=function(z){return clamp(Math.floor((z-CFG.R0)/CFG.STRIDE),0,CFG.NZ-1);};
 CFG.LANE_OFF=[-1.5*CFG.LANE,-0.5*CFG.LANE,0.5*CFG.LANE,1.5*CFG.LANE];
-CFG.PITCHY=Math.sin(CFG.PITCH*DEG)*CFG.DIST;   /* camera height  45.9 */
-CFG.PITCHB=Math.cos(CFG.PITCH*DEG)*CFG.DIST;   /* camera behind  24.5 */
 
 var GL=document.getElementById('gl'),OV=document.getElementById('ov');
 var renderer,camera,scene,fogCol=new THREE.Color(0x9fb0c4);
+var PLAYCAM,FLYCAM;   /* play = ortho plan view, attract/title = perspective orbit */
 var matCity,matProp,matCut,matWater,matAO,matHalo,matTracer,matGlow;
 var waterTex;
+
+/* What the plan camera can actually see, in world metres, centred on the
+   follow point. camFit is the only writer; actor streaming reads it. */
+var VIEW={x:CFG.VIEWW*0.5,z:CFG.VIEWW*0.5625*0.5};
+
+/* Both cameras live at a fixed world size; only the viewport changes. */
+function camFit(w,h){
+  var hw=CFG.VIEWW*0.5,hh=hw*h/Math.max(1,w);
+  if(PLAYCAM){
+    PLAYCAM.left=-hw;PLAYCAM.right=hw;PLAYCAM.top=hh;PLAYCAM.bottom=-hh;
+    PLAYCAM.updateProjectionMatrix();
+  }
+  if(FLYCAM){FLYCAM.aspect=w/h;FLYCAM.updateProjectionMatrix();}
+  VIEW.x=hw;VIEW.z=hh;
+}
 
 function initGL(){
   renderer=new THREE.WebGLRenderer({canvas:GL,antialias:true,stencil:false,
     powerPreference:'high-performance'});
   renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.25));
   renderer.setSize(innerWidth,innerHeight,false);
-  camera=new THREE.PerspectiveCamera(CFG.FOV,innerWidth/innerHeight,1.4,1000);
+  /* Straight-down plan view (GTA1 top-down). Orthographic, not perspective:
+     a perspective eye at any height displaces a roof of height h sideways by
+     d*H/(H-h), so a 44 m tower next to a 13 m street leans into it and the
+     streets close over. Ortho draws exact footprints, like the 2D map. */
+  PLAYCAM=new THREE.OrthographicCamera(-1,1,1,-1,2,2000);
+  PLAYCAM.up.set(0,0,-1);   /* see camUpdate: keeps screen-right at world +X */
+  FLYCAM=new THREE.PerspectiveCamera(CFG.FOV,innerWidth/innerHeight,1.4,1000);
+  camera=PLAYCAM;
+  camFit(innerWidth,innerHeight);
   scene=new THREE.Scene();
   scene.background=new THREE.Color(0x000000);
   scene.fog=new THREE.Fog(0x9fb0c4,180,540);
@@ -1126,7 +1157,7 @@ var OX=OV.getContext('2d');
 function onResize(){
   var w=innerWidth,h=innerHeight;
   renderer.setSize(w,h,false);
-  camera.aspect=w/h;camera.updateProjectionMatrix();
+  camFit(w,h);
   var d=Math.min(window.devicePixelRatio||1,1.25);
   OV.width=Math.floor(w*d);OV.height=Math.floor(h*d);
   OV.style.width=w+'px';OV.style.height=h+'px';
@@ -1223,7 +1254,7 @@ function showStatics(on){
 
 /* ------------------------------------------------------------------ themes */
 var THEMES=[
-{ name:'LIBERTY CITY', chapter:'CHAPTER 1', sub:'EAST COAST, USA',
+{ name:'MERIDIAN CITY', chapter:'CHAPTER 1', sub:'EAST COAST, USA',
   sky:0x93a8c0, fog:0xa3b3c4, fogNear:190, fogFar:560,
   hemiSky:0xbcd0e8, hemiGnd:0x5c574c, hemiI:0.60,
   sunCol:0xfff1d6, sunI:0.80, sunDir:[-55,72,-42], amb:0x303c4e, ambI:0.28,
@@ -1233,13 +1264,13 @@ var THEMES=[
           T.PLASTER,T.GLASS_GREY,T.GLASS_GREY2,T.WAREHOUSE],
   roof:[T.ROOF_GRAVEL,T.ROOF_TAR,T.ROOF_METAL],
   ground:0x7d7f7a,
-  streets:['ALGONQUIN AVE','LIBERTY BLVD','BELLEVILLE PARK RD','ST MARKON PL',
+  streets:['ALGONQUIN AVE','MERIDIAN BLVD','BELLEVILLE PARK RD','ST MARKON PL',
            'CAMPBELL AVE','BRIDGE ST','KENT AVE','HOVER ST','ALTOR ST','SULIVAN ST',
            'TOLLAND ST','DUDLEY HILL','ORTON CT','MILL CT','BEECHWORTH CT'],
   districts:['ALGONQUIN','SOUTH POINT','HOVER','PORTLAND','ST MARKS','CHINATOWN',
              'REDLIGHT','DUDLEY HILL','BELLEVILLE','COMMONwealth','KINGSLOT',
-             'TOLLAND','LIBERTY PARK','SULIVAN','BRIDGE ST','MILL DALE']},
-{ name:'SAN ANDREAS', chapter:'CHAPTER 2', sub:'WEST COAST, USA',
+             'TOLLAND','MERIDIAN PARK','SULIVAN','BRIDGE ST','MILL DALE']},
+{ name:'PACIFIC CITY', chapter:'CHAPTER 2', sub:'WEST COAST, USA',
   sky:0xa8bcc8, fog:0xc0c8bf, fogNear:220, fogFar:640,
   hemiSky:0xd8e4ea, hemiGnd:0x8a7a58, hemiI:0.68,
   sunCol:0xfff0c0, sunI:0.95, sunDir:[-40,80,-30], amb:0x40402f, ambI:0.26,
@@ -1255,7 +1286,7 @@ var THEMES=[
   districts:['SANTO DOMINGO','ROCKSHORE','SANTA MARIA','PARADISO','HILLWAY',
              'GANTOWN','EL CORONADO','INDUSTRIAL','VERDANT','ESCOMERO',
              'SAN MARCO','BACON','OLD TOWN','DOCKSIDE']},
-{ name:'VICE CITY', chapter:'CHAPTER 3', sub:'1986, SOUTH FLORIDA',
+{ name:'PALM CITY', chapter:'CHAPTER 3', sub:'1986, SOUTH FLORIDA',
   sky:0x5b3a6b, fog:0x7b4b74, fogNear:170, fogFar:520,
   hemiSky:0x8f6fa8, hemiGnd:0x4a3a4a, hemiI:0.55,
   sunCol:0xff9a6a, sunI:0.85, sunDir:[-70,42,-30], amb:0x2a2140, ambI:0.38,
@@ -3466,14 +3497,19 @@ function civPaint(){
    KEY = held now, JP = went down since the last frame. */
 var KEY={},JP={};
 var PREVENT={ArrowUp:1,ArrowDown:1,ArrowLeft:1,ArrowRight:1,Space:1,Tab:1,
-  ControlLeft:1,ControlRight:1,KeyM:1};
+  ControlLeft:1,ControlRight:1,KeyM:1,Slash:1};
 var KMAP={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
   KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right',
   Space:'brake',ControlLeft:'fire',ControlRight:'fire',KeyJ:'fire',
   KeyF:'act',KeyE:'act',Enter:'start',NumpadEnter:'start',
   KeyM:'map',Escape:'back',KeyP:'pause',KeyH:'horn',KeyL:'mute',
   Digit1:'w1',Digit2:'w2',Digit3:'w3',Digit4:'w4',Digit5:'w5',KeyQ:'wp',
-  ShiftLeft:'run',ShiftRight:'run'};
+  ShiftLeft:'run',ShiftRight:'run',
+  /* The controls sheet is on `?` (Slash). F12 is what players reach for but it
+     cannot be bound here: Chrome/Firefox open DevTools before the page sees the
+     key, and on macOS F12 is a media key, so keydown never arrives. Firefox
+     also uses plain `/` for quick-find, hence PREVENT.Slash. */
+  Slash:'help'};
 addEventListener('keydown',function(e){
   var k=KMAP[e.code];if(!k)return;
   if(PREVENT[e.code]&&e.preventDefault)e.preventDefault();
@@ -3494,6 +3530,7 @@ var GS={
   hp:100, ar:0, wanted:0, heat:0, coolT:0, starT:0,
   wp:0, ammo:[0,0,0,0,0],
   mission:null, brief:null, msg:'', msgT:0, big:'', bigT:0, sub:'',
+  helpFrom:'play',
   fade:1, modeT:0, deadT:0, kills:0, wrecks:0, runOver:0,
   camShake:0, missionIdx:0, done:[], briefT:0, newHi:0,
   overT:0, bonus:0
@@ -3655,7 +3692,17 @@ function fxStep(dt){
   var i;
   for(i=0;i<POOL.length;i++)POOL[i].step(dt);
   for(i=0;i<DECAL.length;i++)DECAL[i].step(dt);
-  var px=Math.min(innerHeight,innerWidth)*0.5/Math.tan(camera.fov*DEG*0.5);
+  /* The shader divides by eye-space depth. For a perspective eye uPx is that
+     focal length in px and the quotient is px/m; for the ortho plan camera
+     there is no perspective, so pre-multiply px/m by the eye distance and the
+     divide cancels, leaving aS in metres either way. */
+  var px;
+  if(camera.isOrthographicCamera){
+    px=renderer.domElement.height*(camera.position.y-2)/
+       Math.max(0.001,camera.top-camera.bottom);
+  }else{
+    px=Math.min(innerHeight,innerWidth)*0.5/Math.tan(camera.fov*DEG*0.5);
+  }
   for(i=0;i<POOL.length;i++)POOL[i].mat.uniforms.uPx.value=px;
 }
 function fxClear(){
@@ -3714,8 +3761,17 @@ var P={x:0,z:0,y:0,a:0,vx:0,vz:0,ix:0,iz:0,mode:'foot',veh:null,walkT:0,fireCd:0
 var CAM={x:0,z:0};
 function addActor(o){scene.add(o);ACT.push(o);return o;}
 function clearActors(){
-  for(var i=0;i<ACT.length;i++)scene.remove(ACT[i]);
+  /* The player is registered in ACT too (spawnPlayer addActor's him), so this
+     wipe used to take him OUT of the scene graph on every city build: newGame()
+     runs spawnPlayer() before populateCity(), and nothing re-added him. three.js
+     cannot draw a detached object, so the whole session played as an invisible
+     man -- camera follow, physics, collisions and the peds' flee logic all kept
+     working on a model that was never rendered. He is not a streamed actor, so
+     he must survive the rebuild; keep him registered so spawnPlayer's own
+     detach-and-respawn path stays symmetric. */
+  for(var i=0;i<ACT.length;i++){if(ACT[i]!==P.g)scene.remove(ACT[i]);}
   ACT.length=0;VEH.length=0;PED.length=0;
+  if(P.g&&ACT.indexOf(P.g)<0)ACT.push(P.g);
   fxClear();
   if(bullets)bullets.clear();
   if(markers)markersClear();
@@ -3938,11 +3994,14 @@ function integrateVeh(v,dt){
   u.vx=fwd*f-lat*g;u.vz=fwd*g+lat*f;
   /* Yaw first, then re-decompose the unchanged world velocity: the old
      velocity now points partly sideways, and grip eating that lateral part is
-     exactly what produces arcade understeer and handbrake drift.  Heading
-     increases turn the actor left on screen, so steering right subtracts. */
+     exactly what produces arcade understeer and handbrake drift.  u.steer > 0
+     means right everywhere (driveInput and the AI both), and under the fixed
+     camera basis a growing heading swings the nose clockwise on screen, so
+     steering right adds.  Every aiXxx steering law below is derived from that
+     sign: they steer on +angDiff(target, u.a). */
   var sp=Math.abs(fwd),maxSt=1.30*(d.grip/2.4),
       turn=u.steer*maxSt*clamp(sp/5.5,0,1)*(fwd<-0.2?-1:1)*(u.hb?1.45:1)*dead;
-  u.a-=turn*dt;
+  u.a+=turn*dt;
   if(u.a>Math.PI)u.a-=TAU;else if(u.a<-Math.PI)u.a+=TAU;
   f=Math.cos(u.a);g=Math.sin(u.a);
   fwd=u.vx*f+u.vz*g;lat=-u.vx*g+u.vz*f;
@@ -4208,12 +4267,22 @@ function stepDeadBodies(dt){
 /* ------------------------------------------------------------- spawning */
 var CIVK=[VSEDAN,VSEDAN,VSEDAN,VSEDAN,VSEDAN,VTAXI,VTAXI,VVAN,VVAN,
           VTRUCK,VBUS,VSPORT,VBIKE,VSEDAN,VTAXI,VSEDAN,VVAN];
-var CROWD={ped:26,veh:18,t:0};
+var CROWD={ped:32,veh:18,t:0};
 var PLYENGINE=false;
-var DESP_R=118,SPAWN_MIN=38,SPAWN_MAX=64;
-function roadSpawnPoint(rmin,rmax){
+/* Traffic still streams in on a ring, sized from the plan view: at VIEWW 46 the
+   visible box is 46 x 25.9 m at 16:9, so half-width 23 and half-diagonal 26.4.
+   A car born inside that pops onto screen -- the left/right edges are the tight
+   constraint at 23 -- so 28..40 starts every driver past the frame.
+   DESP_R was 118, i.e. 3x the whole view -- cars drove on living off-screen. */
+var DESP_R=52,SPAWN_MIN=28,SPAWN_MAX=40;
+/* Pedestrians are streamed to the visible rectangle, not a ring: the old
+   10..26 m ring was sized against the tilted camera's 45.9 m eye height, and
+   only the sliver of it that fell inside 18 x 10 m could ever be seen. */
+var PED_MIN=6;
+function roadSpawnPoint(rmin,rmax,ox,oz){
+  var cx=(ox===undefined)?P.x:ox,cz=(oz===undefined)?P.z:oz;
   for(var t=0;t<10;t++){
-    var p=roadPointNear(P.x,P.z,rmin,rmax);
+    var p=roadPointNear(cx,cz,rmin,rmax);
     if(overWater(p.x,p.z))continue;
     if(CITY.C.blocked(p.x,p.z,2.6,0.2))continue;
     if(dist2(p.x,p.z,P.x,P.z)<rmin*0.8)continue;
@@ -4234,11 +4303,46 @@ function spawnTraffic(n){
     u.tx=lt.x;u.tz=lt.z;
   }
 }
+/* roadSnap cannot answer "give me pavement 6..18 units from here": laneTarget
+   rebuilds BOTH coordinates from the grid indices, so the along-road coordinate is
+   dropped, every sample inside one cell collapses onto one point, and the ring
+   handed back 43..79 units instead of 10..26.  Pedestrians therefore sample the
+   legs themselves: a junction ring around the centre, a position ALONG the leg,
+   the lane offset across it. Traffic keeps using roadSnap because it steers
+   toward lane targets anyway and never cares where on the leg it starts. */
+function pedRoadPoint(cx,cz,rmin,rmax){
+  var S=CFG.STRIDE,i0=Math.round(cx/S),j0=Math.round(cz/S);
+  for(var t=0;t<20;t++){
+    var i=clamp(i0+rndi(3)-1,0,CFG.NX),j=clamp(j0+rndi(3)-1,0,CFG.NZ);
+    var ax=rndi(2),dir=Math.random()<0.5?1:-1,off=laneOff();
+    var ni=i+(ax?dir:0),nj=j+(ax?0:dir);
+    if(!inGrid(ni,nj)||!legOK(i,j,ni,nj))continue;
+    var v=legVec(ax,dir),f=Math.random();
+    var x=(i+v[0]*f)*S+v[1]*off,z=(j+v[1]*f)*S-v[0]*off;
+    if(x<CFG.R0+1||z<CFG.R0+1||x>CFG.WX-1||z>CFG.WZ-1)continue;
+    var d=dist2(x,z,cx,cz);
+    if(d<rmin||d>rmax)continue;
+    if(overWater(x,z)||CITY.C.blocked(x,z,2.6,0.2))continue;
+    return {x:x,z:z};
+  }
+  return null;
+}
+function inView(x,z,m){
+  return Math.abs(x-CAM.x)<=VIEW.x*m&&Math.abs(z-CAM.z)<=VIEW.z*m;
+}
 function spawnPeds(n){
-  for(var t=0;t<n;t++){
-    var p=roadSpawnPoint(26,58);
+  /* Stream the crowd into the rectangle the plan camera can see.  pedRoadPoint
+     only answers "somewhere on a street rmin..rmax from here", so sample
+     generously (rmax = the half-width, which covers all but the corners of a
+     46 x 26 view) and filter on the rectangle.  The n*8 cap is there because a
+     player parked in a block interior has no street through his view at all. */
+  var rm=Math.max(VIEW.x,VIEW.z),got=0,t;
+  for(t=0;t<n*8&&got<n;t++){
+    var p=pedRoadPoint(P.x,P.z,PED_MIN,rm);
     if(!p)continue;
+    if(!inView(p.x,p.z,0.94))continue;
     regPed(makePed(rndi(PANTS.length),rndi(SKINS.length),rndi(SHIRTS.length)),p.x,p.z,Math.random()*TAU);
+    got++;
   }
 }
 function spawnParked(){
@@ -4262,7 +4366,7 @@ function spawnSeedPeds(){
   for(var i=0;i<s.length&&n<44;i++){
     if(s[i].t!=='d')continue;
     var e=s[i];
-    if(dist2(e.x,e.z,P.x,P.z)>110)continue;
+    if(dist2(e.x,e.z,P.x,P.z)>Math.max(VIEW.x,VIEW.z)*1.35)continue;
     regPed(makePed(rndi(PANTS.length),rndi(SKINS.length),rndi(SHIRTS.length)),e.x,e.z,Math.random()*TAU);
     n++;
   }
@@ -4293,7 +4397,7 @@ function maintain(dt){
   for(i=PED.length-1;i>=0;i--){
     var qu=PED[i].userData;
     if(!qu.alive)continue;
-    if(dist2(qu.x,qu.z,P.x,P.z)>DESP_R*0.75){removeActor(PED[i]);continue;}
+    if(!inView(qu.x,qu.z,1.35)){removeActor(PED[i]);continue;}
     np++;
   }
   var needV=Math.min(3,CROWD.veh-nv-(GS.wanted>0?GS.wanted:0));
@@ -4304,8 +4408,11 @@ function maintain(dt){
 
 /* -------------------------------------------------------- player on foot */
 function footMove(dt){
+  /* Screen-relative input, mapped through the fixed camera basis (+X is screen
+     right, -Z is screen up: see camUpdate).  gz runs from down to up because
+     walking away from the eye means losing Z. */
   var gx=(kd('right')?1:0)-(kd('left')?1:0),
-      gz=(kd('up')?1:0)-(kd('down')?1:0),
+      gz=(kd('down')?1:0)-(kd('up')?1:0),
       m=Math.sqrt(gx*gx+gz*gz),run=kd('run'),sp=run?6.1:3.35;
   if(m>0){gx/=m;gz/=m;P.a=angLerp(P.a,Math.atan2(gz,gx),Math.min(1,dt*14));}
   else{gx=0;gz=0;}/* no input: velocity is the decaying knockback only */
@@ -4428,6 +4535,7 @@ function pedPickTarget(q){
 
 /* --------------------------------------------------------------- camera */
 function camUpdate(dt){
+  camera=PLAYCAM;
   var tx=P.x,tz=P.z;
   if(P.mode==='veh'&&P.veh){
     var u=P.veh.userData,la=Math.min(Math.abs(u.speed)*0.30,3.6);
@@ -4435,13 +4543,20 @@ function camUpdate(dt){
   }
   var k=1-Math.pow(0.000012,dt);
   CAM.x+=(tx-CAM.x)*k;CAM.z+=(tz-CAM.z)*k;
-  var sh=GS.camShake,jx=0,jy=0,jz=0;
+  var sh=GS.camShake,jx=0,jz=0;
   if(sh>0.002){
-    var s=sh*1.4;
-    jx=(Math.random()*2-1)*s;jy=(Math.random()*2-1)*s*0.6;jz=(Math.random()*2-1)*s;
+    var s=sh*VIEW.x*0.05;   /* shake is a fraction of the screen, not metres */
+    jx=(Math.random()*2-1)*s;jz=(Math.random()*2-1)*s;
   }
-  camera.position.set(CAM.x+jx,CFG.PITCHY+jy,CAM.z-CFG.PITCHB+jz);
-  camera.lookAt(CAM.x+jx*0.5,0,CAM.z+jz*0.5);
+  /* Straight down. up=(0,0,-1) makes lookAt build x = up x z = (+1,0,0), so
+     world +X stays screen-right and world -Z stays screen-up: the same
+     handedness the city map draws with (mapX +X right, mapZ +Z down) and the
+     basis every input mapping assumes.  Spin the basis on the screen instead
+     and left/right invert for the player and every driver while the world
+     maths stays "correct".  The target is 1 m below the eye purely so lookAt
+     has a non-degenerate view axis; the frustum is unaffected. */
+  camera.position.set(CAM.x+jx,CFG.CAMH,CAM.z+jz);
+  camera.lookAt(CAM.x+jx,CFG.CAMH-1,CAM.z+jz);
   GS.camShake=Math.max(0,sh-dt*(1.8+sh));
 }
 function engineAudio(dt){
@@ -4931,7 +5046,7 @@ function spawnPolice(){
   var have=countPolice(),need=copCap()-have,j;
   if(need<=0)return;
   for(j=0;j<need;j++){
-    var p=roadSpawnPoint(38,64);
+    var p=roadSpawnPoint(SPAWN_MIN,SPAWN_MAX);
     if(!p)continue;
     var v=regVeh(makeVehicle(VCOP,null),p.x,p.z,headingOf(p)),u=v.userData;
     u.i=p.i;u.j=p.j;u.ax=p.ax;u.dir=p.dir;u.off=p.off;
@@ -4943,7 +5058,7 @@ function spawnPolice(){
   }
 }
 function spawnCopPed(){
-  var p=roadSpawnPoint(26,52);
+  var p=roadSpawnPoint(PED_MIN+18,PED_MIN+30);
   if(!p)return;
   var q=regPed(makePed(1,rdi(SKINS.length),6),p.x,p.z,headingOf(p)),u=q.userData;
   u.kind='cop';u.hp=52;u.spd=3.4;u.fireCd=1.2+Math.random();
@@ -5004,7 +5119,7 @@ function aiCop(v,dt){
   var lead=clamp(dd/26,0,1.4);
   var axy=P.x+(lv.vx||0)*lead,azy=P.z+(lv.vz||0)*lead;
   var ta=Math.atan2(azy-u.z,axy-u.x),err=angDiff(ta,u.a);
-  u.steer+=(clamp(-err*1.9,-1,1)-u.steer)*Math.min(1,dt*6);
+  u.steer+=(clamp(err*1.9,-1,1)-u.steer)*Math.min(1,dt*6);
   if(Math.abs(err)>2.1&&sp<4)u.thr=-0.7;
   else if(dd<7.5&&sp>9)u.thr=-0.5;
   else u.thr=approach(u.thr,(dd>9?1:0.35),dt*2.6);
@@ -5079,13 +5194,13 @@ function cruise(v,dt,police){
   var sp=Math.abs(u.speed),ta=Math.atan2(u.tz-u.z,u.tx-u.x);
   var err=angDiff(ta,u.a),look=4.6+sp*0.55;
   var blk=aheadBlock(u,look,(u.lenr+u.winr)*0.34,v,police?1:0);
-  var steer=clamp(-err*1.9,-1,1);
+  var steer=clamp(err*1.9,-1,1);
   if(blk===1&&sp>2.5&&!police){
     var rx=Math.sin(u.a),rz=-Math.cos(u.a);
     var cx=u.tx+rx*3.4,cz=u.tz+rz*3.4;
     if(!CITY.C.blocked(cx,cz,2.2,0.2)){
       ta=Math.atan2(cz-u.z,cx-u.x);
-      steer=clamp(-angDiff(ta,u.a)*1.9,-1,1);
+      steer=clamp(angDiff(ta,u.a)*1.9,-1,1);
     }
   }
   var lim=d.top*(police?0.98:0.7);
@@ -5818,7 +5933,7 @@ function drawHUD(){
   rect(0,BH-2,W,2,'rgba(224,27,27,0.75)');
 
   /* --- logo block --- */
-  tx('GTA',12*S,BH*0.54,'#e01b1b',BH*0.66,900,FB,'left','#5d0808');
+  tx('MM',12*S,BH*0.54,'#e01b1b',BH*0.66,900,FB,'left','#5d0808');
   var x=12*S+BH*1.42;
   OX.fillStyle='rgba(255,255,255,0.13)';OX.fillRect(x,BH*0.2,1,BH*0.6);
   x+=12*S;
@@ -5893,6 +6008,7 @@ function drawHUD(){
     if(GS.lives>0)tx('PRESS ENTER TO CONTINUE',UI.w*0.5,UI.h*0.62,'#e8e8e8',
       Math.max(13,17*S),700,FN,'center');
   }
+  drawHelpChip(S);
 }
 function bigDraw(){
   OX.globalAlpha=Math.min(1,GS.bigT/0.5);
@@ -6036,8 +6152,8 @@ function drawTitle(){
   var S=hudScale(),W=UI.w,H=UI.h,th=THEMES[HUDC.sel];
   scrim(0.62);
   var lg=Math.max(64,H*0.19);
-  tx('GTA',W*0.5,H*0.30,'#e01b1b',lg,900,FB,'center','#5d0808');
-  tx('G R A N D   T H E F T   A U T O',W*0.5,H*0.30+lg*0.55,'#c9c9c9',
+  tx('MM',W*0.5,H*0.30,'#e01b1b',lg,900,FB,'center','#5d0808');
+  tx('M E T R O   M A Y H E M',W*0.5,H*0.30+lg*0.55,'#c9c9c9',
      Math.max(11,H*0.020),700,MONO,'center');
   rect(W*0.5-Math.min(W*0.26,300*S),H*0.44,Math.min(W*0.52,600*S),2,'rgba(224,27,27,0.8)');
   tx(th.name,W*0.5,H*0.52,'#ffffff',Math.max(22,H*0.052),900,FB,'center');
@@ -6049,6 +6165,7 @@ function drawTitle(){
      W*0.5,H*0.87,'#6f757b',Math.max(10,H*0.0165),700,FN,'center',0);
   tx('1-5 WEAPONS   M MAP   P PAUSE   L MUTE   H HORN',
      W*0.5,H*0.905,'#6f757b',Math.max(10,H*0.0165),700,FN,'center',0);
+  if(blink(1.0))tx('?  CONTROLS',W*0.5,H*0.945,'#e01b1b',Math.max(10,H*0.0165),900,MONO,'center',0);
   if(GS.msgT>0&&GS.msg)tx(GS.msg,W*0.5,H*0.81,'#ffffff',Math.max(12,16*S),700,FN,'center');
 }
 function drawPause(){
@@ -6061,6 +6178,57 @@ function drawPause(){
      Math.max(12,16*S),900,FB,'center');
   tx('CITY JOBS '+GS.done.length+'/'+MISSION_N,UI.w*0.5,UI.h*0.615,'#8b8b8b',
      Math.max(11,14*S),700,FN,'center');
+}
+/* Two columns so the sheet fits 720p without scrolling; every line is
+   key(s) then what it does. Keep in sync with KMAP above and the title hints. */
+var HELPROWS=[
+  ['W A S D  /  ARROWS','Move (screen-relative)'],
+  ['SHIFT','Sprint / reverse'],
+  ['SPACE','Handbrake'],
+  ['CTRL  or  J','Fire / punch'],
+  ['F  or  E','Enter / exit car, accept job'],
+  ['1 - 5','Select weapon'],
+  ['Q','Next weapon with ammo'],
+  ['M','City map'],
+  ['P','Pause'],
+  ['H','Horn'],
+  ['L','Mute sound'],
+  ['ENTER','Start / resume'],
+  ['?  or  ESC','Close this list']
+];
+function drawHelp(){
+  var S=hudScale(),W=UI.w,H=UI.h,n=HELPROWS.length;
+  scrim(0.80);
+  var two=W>=720, half=two?Math.ceil(n/2):n;
+  var lh=Math.max(15,Math.min(30,H*0.0417));
+  var kp=Math.max(11,15*S), vp=Math.max(10,13*S);
+  var kvw=Math.max(108,kp*12.9), vw=Math.max(140,vp*15.6), cw=kvw+vw;
+  var gap=Math.max(20,W*0.018);
+  var pw=two?Math.min(W*0.90,2*(cw+lh*1.6)+gap):Math.min(W*0.94,cw+lh*2.2);
+  var ph=half*lh+lh*4.6;
+  var px0=(W-pw)*0.5,py0=(H-ph)*0.5;
+  rect(px0,py0,pw,ph,'rgba(8,10,13,0.88)');
+  rect(px0,py0,pw,3,'#e01b1b');
+  tx('CONTROLS',px0+pw*0.5,py0+lh*1.15,'#e01b1b',Math.max(20,H*0.045),900,FB,'center','#3d0505');
+  rect(px0+lh*1.2,py0+lh*2.1,pw-lh*2.4,2,'rgba(224,27,27,0.5)');
+  var x0=px0+lh*1.6,x1=two?x0+cw+gap:x0;
+  for(var i=0;i<n;i++){
+    var c=two?(i<half?0:1):0,r=two?(c?i-half:i):i;
+    var py=py0+lh*2.9+r*lh;
+    tx(HELPROWS[i][0],c?x1:x0,py,'#ffffff',kp,900,MONO,'left',0);
+    tx(HELPROWS[i][1],(c?x1:x0)+kvw,py,'#9aa0a6',vp,700,FN,'left',0);
+  }
+  if(blink(1.4))tx('PRESS ? TO GO BACK',px0+pw*0.5,py0+ph-lh*0.75,'#ffffff',
+     Math.max(12,16*S),900,FB,'center');
+}
+/* The reminder the sheet is reached from. Drawn last in drawHUD so it survives
+   every other overlay; bottom-right is the one corner no HUD element uses. */
+function drawHelpChip(S){
+  var px=Math.max(10,13*S),y=UI.h-Math.max(12,16*S);
+  tx('CONTROLS',UI.w-Math.max(12,16*S),y,'#9aa0a6',px,700,MONO,'right',0);
+  hf(px,700,MONO);
+  tx('?',UI.w-Math.max(12,16*S)-OX.measureText('CONTROLS').width-Math.max(5,7*S),
+     y,'#e01b1b',px*1.25,900,MONO,'right',0);
 }
 function drawOver(){
   var S=hudScale(),fin=(GS.city+1>=THEMES.length&&GS.done.length>=MISSION_N);
@@ -6178,6 +6346,15 @@ function uiStep(dt){
   var m=GS.mode;
   if(jp('mute')){SND.setMute(!SND.isMute());say(SND.isMute()?'SOUND OFF':'SOUND ON',1.4);}
   if(jp('horn')&&m==='play')SND.horn();
+  if(m==='help'){
+    if(jp('help')||jp('start')||jp('back')||jp('pause')){
+      GS.mode=GS.helpFrom;GS.modeT=0;SND.menu();
+    }
+    return;                       /* nothing else reaches a live game while reading */
+  }
+  if(jp('help')&&(m==='title'||m==='play'||m==='map'||m==='pause')){
+    GS.helpFrom=m;GS.mode='help';GS.modeT=0;SND.menu();return;
+  }
   if(m==='title'){
     if(jp('start')||jp('fire')||jp('act')){newGame(HUDC.sel);return;}
     if(jp('right')||jp('down')){selectCity(1);return;}
@@ -6228,6 +6405,12 @@ function drawFrame(){
   else if(m==='map')drawMap();
   else if(m==='over')drawOver();
   else if(m==='complete')drawComplete();
+  else if(m==='help'){
+    /* paint the sheet over whatever was already on screen, so the game does not
+       blink out behind it. drawHUD() dereferences P, which is null on the title. */
+    if(GS.helpFrom==='title')drawTitle();else drawHUD();
+    drawHelp();
+  }
   else{drawHUD();if(m==='pause')drawPause();}
   if(GS.fade>0.002){
     OX.fillStyle='rgba(0,0,0,'+GS.fade.toFixed(3)+')';
@@ -6237,6 +6420,7 @@ function drawFrame(){
 }
 /* attract mode: a slow low orbit over the city the player is about to get */
 function titleCam(dt){
+  camera=FLYCAM;
   var t=GS.clock*0.045;
   var fx=CFG.WX*(0.32+0.30*(0.5+0.5*Math.sin(t*0.7)));
   var fz=CFG.WZ*(0.36+0.28*(0.5+0.5*Math.cos(t*0.55)));

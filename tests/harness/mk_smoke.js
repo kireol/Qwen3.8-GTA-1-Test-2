@@ -1,5 +1,5 @@
 const fs=require('fs');
-const SRC='$HOME/projects/gta1/src/gta1.html';
+const SRC='$HOME/projects/gta1/src/index.html';
 let s=fs.readFileSync(SRC,'utf8');
 const CDN='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
 if(s.indexOf(CDN)<0)throw new Error('CDN tag not found');
@@ -1021,7 +1021,294 @@ try{
       }
     }catch(e){C.briefFixErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
 
-    /* --- 7. newGame(1) LAST: a full SAN ANDREAS rebuild through the chunk-5
+    /* --- 6.5 Playtest report: "I think A and D keys are swapped. I don't see any
+       people yet." camUpdate only moves the EYE and always looks at (CAM.x,0,
+       CAM.z), so the play camera never rotates and its screen basis is fixed for
+       the whole session. That makes both halves of the report measurable instead
+       of debatable: hold one key, turn the resulting world displacement into that
+       basis, and read which side of the screen it lands on; then project every
+       live pedestrian and count how many really reach the frustum. Nothing here
+       trusts the sign written in the input code -- the first run of this probe is
+       what settled the report, so it stays as the regression. --- */
+    var PL={};
+    try{
+      var bNow=function(){camera.updateMatrixWorld(true);
+        var m=camera.matrixWorld.elements;
+        return {rx:m[0],rz:m[2],ux:m[4],uz:m[6]};};
+      var scrOf=function(b,dx,dz){return {sx:dx*b.rx+dz*b.rz,sy:dx*b.ux+dz*b.uz};};
+      var prNdc=function(x,y,z){
+        camera.updateMatrixWorld(true);
+        camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+        var v=new THREE.Vector3(x,y,z);v.project(camera);return v;};
+      /* newGame(0) is the exact path the player used: title click -> newGame
+         (HUDC.sel) -> MERIDIAN CITY, on foot, at the centre of the grid. */
+      newGame(0);stage('play');
+      fr(45,null);/* settle the follow camera so its basis is the shipped one */
+      var bb=bNow();
+      var fpPx=function(x,y,z,hw){/* screen px covered by a 2*hw m wide slab */
+        return Math.abs(prNdc(x-hw,y,z).x-prNdc(x+hw,y,z).x)*
+               0.5*renderer.domElement.width;};
+      PL.cam={ortho:camera.isOrthographicCamera?1:0,
+              worldX_is_screenRight:r1(bb.rx),worldZ_is_screenRight:r1(bb.rz),
+              worldZ_is_screenUp:r1(bb.uz),
+              eyeZminusPlayerZ:r1(camera.position.z-CAM.z),eyeY:r1(camera.position.y),
+              view:[r1(VIEW.x),r1(VIEW.z)],
+              pxPerM:Math.round(renderer.domElement.width/(VIEW.x*2))};
+      /* "I see other people now, but not the main character." He is not another
+         crowd member who happened to land off screen: the camera follows HIM, so
+         he is the one actor guaranteed to be centred. Measure that directly --
+         NDC offset from screen centre plus his own footprint in px at 1.2 m
+         (shoulders), where a tilted 52-unit eye gave him under 10 px of height. */
+      var pn=prNdc(P.x,P.y+1.2,P.z);
+      PL.ply={ndc:[r1(pn.x),r1(pn.y)],
+              onScreen:(pn.z<1&&pn.z>-1&&Math.abs(pn.x)<1&&Math.abs(pn.y)<1)?1:0,
+              centrePx:Math.round(Math.max(Math.abs(pn.x),Math.abs(pn.y))*
+                       0.5*renderer.domElement.height),
+              fpPx:Math.round(fpPx(P.x,P.y+1.2,P.z,0.32)),
+              /* Everything above is arithmetic, and arithmetic was green while the
+                 user still could not see him: three.js only paints what is in the
+                 scene graph. clearActors() wiped ACT -- where spawnPlayer had
+                 registered P.g -- so the player was detached on every city build
+                 and never drawn. These two fields are the pixels' ground truth. */
+              attach:(P.g&&P.g.parent===scene)?1:0,
+              inAct:(P.g&&ACT.indexOf(P.g)>=0)?1:0};
+      /* 1. do the pedestrians that exist actually reach the screen, and how big
+         are they there? A ped the player cannot see is worth nothing. */
+      var rows=[],i8,alive=0;
+      for(i8=0;i8<PED.length;i8++){
+        var pg=PED[i8],pu=pg.userData;
+        if(!pu.alive)continue;
+        alive++;
+        var ddx=pu.x-P.x,ddz=pu.z-P.z,dd=Math.sqrt(ddx*ddx+ddz*ddz);
+        var vb=prNdc(pu.x,pu.y,pu.z);
+        rows.push({d:r1(dd),ndc:[r1(vb.x),r1(vb.y)],vis:
+          (vb.z<1&&vb.z>-1&&vb.x>-1&&vb.x<1&&vb.y>-1&&vb.y<1)?1:0,
+          /* Looking straight down there is no head-above-foot extent left to
+             measure: a person's screen signature is their FOOTPRINT, so "how
+             big" is now the width of a 0.6 m slab across the shoulders
+             (makePed r=0.30), in px. 1.74 m of height projects to ~0. */
+          w:Math.round(fpPx(pu.x,pu.y+0.9,pu.z,0.30)),
+          x:r1(pu.x),z:r1(pu.z),
+          y:r1(pu.y),gnd:r1(CITY.C.groundH(pu.x,pu.z))});
+      }
+      rows.sort(function(a,c){return a.d-c.d;});
+      var vsel=rows.filter(function(r){return r.vis;});
+      var hh=vsel.map(function(r){return r.w;}).sort(function(a,c){return a-c;});
+      var yOff=0;
+      for(i8=0;i8<rows.length;i8++)yOff=Math.max(yOff,Math.abs(rows[i8].y-rows[i8].gnd));
+      var triW=renderer.info.render.triangles;
+      for(i8=0;i8<PED.length;i8++)PED[i8].visible=false;
+      tryRender();
+      var triOut=renderer.info.render.triangles;
+      for(i8=0;i8<PED.length;i8++)PED[i8].visible=true;
+      var spots={},spread=[1e9,-1e9,1e9,-1e9];
+      for(i8=0;i8<rows.length;i8++){
+        spots[rows[i8].x+','+rows[i8].z]=1;
+        if(rows[i8].x<spread[0])spread[0]=rows[i8].x;
+        if(rows[i8].x>spread[1])spread[1]=rows[i8].x;
+        if(rows[i8].z<spread[2])spread[2]=rows[i8].z;
+        if(rows[i8].z>spread[3])spread[3]=rows[i8].z;
+      }
+      var nSpots=0;for(var sk in spots)nSpots++;
+      PL.ped={n:PED.length,alive:alive,onScreen:vsel.length,
+        nearest:rows.length?rows[0].d:null,
+        median:rows.length?rows[rows.length>>1].d:null,
+        farthest:rows.length?rows[rows.length-1].d:null,
+        within18:rows.filter(function(r){return r.d<18;}).length,
+        fp8:vsel.filter(function(r){return r.w>=8;}).length,
+        fpPxMedian:hh.length?hh[hh.length>>1]:null,
+        fpPxMin:hh.length?hh[0]:null,
+        triDelta:triW-triOut,yOff:r1(yOff),
+        spots:nSpots,bbox:[r1(spread[0]),r1(spread[1]),r1(spread[2]),r1(spread[3])],
+        nearest5:rows.slice(0,5)};
+      /* Call the spawn chain the game itself uses. PED.length only says how many
+         made it into the array; this says what the ring actually hands back, which
+         is how the "all 31 peds sit on one point" collapse was localised to
+         roadSnap (laneTarget rebuilds both coords from the grid indices). snapDists
+         is the old roadSnap-backed ring, pedDists the leg-sampled one. Under the
+         plan camera the answer must be a street INSIDE the visible rectangle, so
+         the query radius is the box half-diagonal, not the old 26..52 band. */
+      var ringR=Math.max(VIEW.x,VIEW.z);
+      var tries=[],nulls=0,ptries=[],pnulls=0;
+      for(i8=0;i8<12;i8++){
+        var rp=roadSpawnPoint(SPAWN_MIN,SPAWN_MAX,P.x,P.z);
+        if(!rp)nulls++;else tries.push(r1(dist2(rp.x,rp.z,P.x,P.z)));
+        var pp=pedRoadPoint(P.x,P.z,PED_MIN,ringR);
+        if(!pp)pnulls++;else ptries.push(r1(dist2(pp.x,pp.z,P.x,P.z)));
+      }
+      var ns=roadSnap(P.x,P.z);
+      /* Acceptance rate of the real spawn loop: pedRoadPoint only guarantees the
+         ring, inView is what spawnPeds filters on. If a lot of hits get dropped
+         the crowd cannot refill inside the view, so count it (no actors made). */
+      var acc=0,accOK=0;
+      for(i8=0;i8<40;i8++){
+        var ap=pedRoadPoint(P.x,P.z,PED_MIN,ringR);
+        if(!ap)continue;
+        acc++;if(inView(ap.x,ap.z,0.94))accOK++;
+      }
+      PL.spawn={player:[r1(P.x),r1(P.z)],viewHalf:[r1(VIEW.x),r1(VIEW.z)],
+        pedMin:PED_MIN,ringR:r1(ringR),despR:DESP_R,crowdPed:CROWD.ped,
+        accept:accOK+'/'+acc,inViewPeds:vsel.length,
+        snapOfPlayer:[r1(ns.x),r1(ns.z),r1(dist2(ns.x,ns.z,P.x,P.z))],
+        snapNulls:nulls,snapDists:tries,pedNulls:pnulls,pedDists:ptries};
+      /* 2. the leg controls, in screen space. tp() parks him between keys so one
+         long walk cannot carry him into a wall and confuse the measurement. */
+      var walkOne=function(keys){
+        var x0=P.x,z0=P.z;
+        fr(30,keys);
+        var dx=P.x-x0,dz=P.z-z0,s=scrOf(bNow(),dx,dz);
+        tp(x0,z0,0);fr(20,null);
+        return {world:[r1(dx),r1(dz)],screen:[r1(s.sx),r1(s.sy)]};
+      };
+      PL.walk={right:walkOne({right:1}),left:walkOne({left:1}),
+               up:walkOne({up:1}),down:walkOne({down:1})};
+      PL.walkOK=(PL.walk.right.screen[0]>0.5&&PL.walk.left.screen[0]<-0.5&&
+                 PL.walk.up.screen[1]>0.5&&PL.walk.down.screen[1]<-0.5);
+      /* 3. the wheel: a right steer must curve the NOSE clockwise on screen,
+         which is a negative screen-angle delta. */
+      var br8=boardIsolated(85);
+      stage('play');
+      if(!br8||!br8.car)PL.drive={err:br8?(br8.err||'no-car'):'none'};
+      else if(P.mode!=='veh'||!P.veh)PL.drive={err:'not-seated'};
+      else{
+        var uv8=P.veh.userData;
+        fr(40,{up:1});
+        var a80=uv8.a,b80=bNow();
+        fr(30,{up:1,right:1});
+        var b81=bNow(),a81=uv8.a;
+        var nose=function(a,b){var f=Math.cos(a),g=Math.sin(a);
+          return Math.atan2(f*b.ux+g*b.uz,f*b.rx+g*b.rz);};
+        var da8=nose(a81,b81)-nose(a80,b80);
+        while(da8>Math.PI)da8-=TAU;while(da8<-Math.PI)da8+=TAU;
+        PL.drive={seated:true,speed:r1(uv8.speed),
+          worldDeg:r1((a81-a80)*180/Math.PI),screenDeg:r1(da8*180/Math.PI),
+          rightTurnsClockwise:da8<0};
+      }
+      /* "I don't see any people" was never about PED.length: the first run of this
+         probe found 26 live peds, all of them 49..64 units out and 9 px tall, half
+         of them behind the eye plane. So the gate is what the player can count, not
+         what the array holds -- plus floors on how CLOSE and how BIG, which are the
+         parts that were broken.
+         Measured on the plan camera at CFG.VIEWW 46 (run_v46): a 1280 px canvas
+         showing 46 m of world = 27.8 px/m, so a 0.6 m shoulder slab is 17 px and
+         the player's 0.64 m slab is 18 px, at ANY distance -- ortho has no
+         perspective falloff, which is exactly why the old tilted 45.9 m eye capped
+         every person at ~9 px. px/m depends only on canvas WIDTH, so the height
+         jitter of a headless viewport cannot move these numbers.
+         CROWD.ped is 32 and all 32 landed alive, on screen (the wider view now
+         contains the whole streamed crowd), at 32 distinct spots, 25 within 18 m,
+         nearest 6.02 (PED_MIN=6 is the design floor, so <5 would mean steering
+         walked one into the player) and 17 px. The 16 px floors ARE the legibility
+         requirement, not a margin under the measurement -- 1-2 px of headroom is
+         deliberate: a zoom-in below ~42 m would fail them, which is the point.
+         The player himself: ndc (0,0), centrePx 0, 18 px wide -- he is the one
+         actor the follow camera guarantees is centred, so anything but centrePx 0
+         and >=16 px is the "not the main character" bug back again. */
+      /* The player must not only project to the middle of the frame, he must be
+         reachable by the renderer: parented to the scene and still registered.
+         Projection-only gates stayed green for two windows while clearActors()
+         detached him, because three.js silently skips a parentless object. */
+      PL.plyOK=(PL.ply.onScreen===1&&PL.ply.centrePx<=8&&PL.ply.fpPx>=16&&
+                PL.ply.attach===1&&PL.ply.inAct===1);
+      PL.pedOK=(PL.ped.onScreen>=24&&PL.ped.fp8>=24&&PL.ped.within18>=20&&
+                PL.ped.spots>=20&&PL.ped.nearest>=5&&PL.ped.nearest<=12&&
+                PL.ped.fpPxMedian>=16);
+      PL.ok=(PL.walkOK&&PL.drive.rightTurnsClockwise===true&&PL.pedOK===true&&
+             PL.plyOK===true);
+      /* The report is only checked for log [] by run.sh, so a probe that quietly
+         regresses would still look green. Fail loudly instead. */
+      if(!PL.ok)slog('PLAY-PROBE '+JSON.stringify({walk:PL.walkOK,
+        drive:PL.drive.rightTurnsClockwise,ped:PL.pedOK,ply:PL.plyOK,
+        onScreen:PL.ped.onScreen,fp8:PL.ped.fp8,within18:PL.ped.within18,
+        nearest:PL.ped.nearest,median:PL.ped.median,fpPx:PL.ped.fpPxMedian,
+        fpPxMin:PL.ped.fpPxMin,spots:PL.ped.spots,plyPx:PL.ply.fpPx,
+        plyAttach:PL.ply.attach,plyInAct:PL.ply.inAct,
+        centrePx:PL.ply.centrePx,accept:PL.spawn.accept}));
+    }catch(e){PL.err=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+    C.play=PL;
+
+    /* --- 6.6 the controls sheet. Players reach for F12, which is unbindable
+       here (DevTools takes it before the page sees it, and on macOS plain F12 is
+       a media key), so the sheet lives on '?' (e.code 'Slash'). Unlike every
+       other scenario this drives the real window keydown/keyup listeners, so a
+       regression in KMAP, PREVENT or the JP edge fails here rather than only in a
+       browser. Four things must hold: '?' opens and closes the sheet, the world
+       freezes under it (stepWorld is gated by mode -- with W and D held a leaked
+       step would show up as displacement), the new paint path is alive (drawFrame
+       -> drawHUD/drawTitle + drawHelp; a null deref there lands in stepErrs), and
+       the reminder chip is actually painted during play. */
+    var HE={};
+    try{
+      function keyfire(code){
+        var ev=new KeyboardEvent('keydown',{code:code,cancelable:true});
+        dispatchEvent(ev);
+        HE[code]=ev.defaultPrevented;
+        dispatchEvent(new KeyboardEvent('keyup',{code:code}));
+      }
+      var oChip=drawHelpChip,oSheet=drawHelp,nChip=0,nSheet=0;
+      drawHelpChip=function(){nChip++;return oChip.apply(this,arguments);};
+      drawHelp=function(){nSheet++;return oSheet.apply(this,arguments);};
+      stage('play');
+      GS.brief=null;GS.mission=null;GS.briefT=0;
+      HE.done0=GS.done.length;
+      HE.keys=[];for(var kh in KMAP)if(KMAP[kh]==='help')HE.keys.push(kh);
+      keyfire('Slash');
+      fr(1,null);
+      HE.opened=GS.mode;HE.from=GS.helpFrom;HE.sheet1=nSheet;
+      var hx=P.x,hz=P.z;
+      fr(120,{up:1,right:1});
+      HE.holdMode=GS.mode;HE.frozen=Math.round(Math.abs(P.x-hx)+Math.abs(P.z-hz));
+      HE.chipFrames=nChip;
+      keyfire('Slash');
+      fr(1,null);
+      HE.closed=GS.mode;
+      var mx=P.x,mz=P.z;
+      fr(90,{up:1,right:1});
+      HE.moved=Math.round(Math.abs(P.x-mx)+Math.abs(P.z-mz));
+      keyfire('Slash');fr(1,null);
+      keyfire('Escape');fr(1,null);
+      HE.escClosed=GS.mode;
+      stage('title');
+      keyfire('Slash');fr(2,null);
+      HE.titleMode=GS.mode;HE.titleFrom=GS.helpFrom;
+      keyfire('Slash');fr(1,null);
+      HE.titleBack=GS.mode;
+      drawHelpChip=oChip;drawHelp=oSheet;
+      /* PREVENT must cover Slash or Firefox quick-find eats the keypress.
+         moved>8 is the positive control: the identical 90 held frames in front of
+         the sheet moved the player 0 m, and free on-foot walking measures
+         ~0.12 m/frame here (the sheet itself ran 120 frames for 0 m), so 90
+         frames owes ~11 m and a frozen-play bug cannot pass this silently. */
+      HE.ok=(HE.opened==='help'&&HE.from==='play'&&HE.sheet1===1&&
+             HE.holdMode==='help'&&HE.frozen===0&&HE.closed==='play'&&
+             HE.moved>8&&HE.escClosed==='play'&&HE.titleMode==='help'&&
+             HE.titleFrom==='title'&&HE.titleBack==='title'&&
+             HE.Slash===true&&HE.chipFrames>=1&&HE.keys.length===1&&
+             HE.keys[0]==='Slash');
+      /* slog truncates a line at 200 chars, and a full JSON dump of HE gets cut
+         off exactly where the failing gate would be, so name only what broke. */
+      if(!HE.ok){
+        var hwant={opened:'help',from:'play',holdMode:'help',closed:'play',
+                   escClosed:'play',titleMode:'help',titleFrom:'title',
+                   titleBack:'title'};
+        HE.bad=[];
+        for(var hk in hwant)if(HE[hk]!==hwant[hk])HE.bad.push(hk+'='+HE[hk]);
+        if(HE.sheet1!==1)HE.bad.push('sheet1='+HE.sheet1);
+        if(HE.chipFrames<1)HE.bad.push('chip='+HE.chipFrames);
+        if(HE.frozen!==0)HE.bad.push('frozen='+HE.frozen);
+        if(!(HE.moved>8))HE.bad.push('moved='+HE.moved);
+        if(HE.Slash!==true)HE.bad.push('prevent=0');
+        if(HE.keys.length!==1||HE.keys[0]!=='Slash')HE.bad.push('keys='+HE.keys);
+        slog('HELP-PROBE '+HE.bad.join(' '));
+      }
+    }catch(e){
+      HE.err=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];
+      try{if(oChip)drawHelpChip=oChip;if(oSheet)drawHelp=oSheet;}catch(e2){}
+      slog('HELP-PROBE '+HE.err);
+    }
+    C.help=HE;
+
+    /* --- 7. newGame(1) LAST: a full PACIFIC CITY rebuild through the chunk-5
        transition chain (clearActors + buildCity + spawnPlayer + populateCity).
        This is the first time city 1 has ever been built. It also leaves the city
        that R.audit2 audits a different one from every earlier run, so audit2 is
@@ -1031,6 +1318,14 @@ try{
       var pol=0,i7;
       newGame(1);
       for(i7=0;i7<VEH.length;i7++)if(VEH[i7].userData.role==='police')pol++;
+      /* The rebuild is precisely the path that orphaned him: spawnPlayer adds P.g
+         to the scene AND to ACT, populateCity's clearActors then scene.remove'd
+         every ACT entry, and nothing put him back -- so he played a whole session
+         invisible. The render check therefore belongs immediately after newGame. */
+      var pAtt=(P.g&&P.g.parent===scene)?1:0, pReg=(P.g&&ACT.indexOf(P.g)>=0)?1:0;
+      var bad7=actorScan();
+      if(!pAtt)bad7.push('plyDetached');
+      if(!pReg)bad7.push('plyUnregistered');
       C.newgame={th:TH.name,chapter:TH.chapter,city:GS.city,mode:GS.mode,
         unlocked:HUDC.unlocked,sel:HUDC.sel,
         veh:VEH.length,ped:PED.length,box:PARKBOX.length,phones:PHONES.length,
@@ -1039,7 +1334,9 @@ try{
         score:GS.score,cash:GS.cash,lives:GS.lives,cityScore:GS.cityScore,
         done:GS.done.length,ammo:GS.ammo.join('/'),wp:GS.wp,
         big:GS.big,msg:GS.msg,fade:r1(GS.fade),
-        bad:actorScan(),fx:fxRep().on};
+        plyAttach:pAtt,plyInAct:pReg,
+        bad:bad7,fx:fxRep().on};
+      if(!pAtt||!pReg)slog('NEWGAME-PLY '+bad7.join(' '));
     }catch(e){C.newgameErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
 
     R.c5=C;
@@ -1052,11 +1349,114 @@ try{
 R.missing=H.missing;R.log=H.log;R.errKinds=EKEY;R.pois=H.pois;R.firstBad=H.firstBad;
 R.trapErr=H.trapErr;R.trapN=H.trapN;
 R.counts={errs:H.errs,stepErrs:H.stepErrs,rendErrs:H.rendErrs,frames:H.frames,stop:H.stop};
+/* ?shot=1 -> a frame worth LOOKING at. Deliberately the last thing before the
+   report is written, and after R.audit2 (which audits the PACIFIC CITY that
+   scenario 7 built): rebuilding MERIDIAN CITY here would change what that audit
+   sees. tick() is the real game frame (uiStep + stepWorld + drawFrame + render),
+   so the HUD, crowd and plan camera are the shipped ones, at the game's own
+   spawn -- the exact screen the player complains about.
+   ?help=1 additionally opens the CONTROLS sheet over it, which is the only way
+   to see that overlay headlessly.
+   RECIPE (verified --dump-dom | python3 base64 -> PNG). Do NOT use
+   --screenshot: it captures before this hook runs, so both attempts came back
+   as the same 4250-byte all-black 1280x720 box. */
+if(/[?&]shot=1/.test(location.search)){
+  try{
+    /* r1 lives in the scenario block's scope, not here -- a local helper keeps
+       this hook independent of it (that ReferenceError is what killed R.shot). */
+    function rr(v){return Math.round(v*10)/10;}
+    newGame(0);
+    C4C.die=0;GS.hp=100;GS.lives=Math.max(1,GS.lives);GS.wanted=0;GS.heat=0;
+    GS.mode='play';GS.modeT=0;GS.fade=0;GS.camShake=0;
+    GS.mission=null;GS.brief=null;GS.briefT=0;
+    for(var si=0;si<180;si++)tick(1/60);
+    GS.big='';GS.bigT=0;GS.sub='';         /* the city card would ink screen centre */
+    if(/[?&]help=1/.test(location.search)){GS.helpFrom='play';GS.mode='help';GS.modeT=0;}
+    tick(1/60);
+    /* A WebGL canvas is cleared as soon as the browser composites it
+       (preserveDrawingBuffer is off, as it should be), so --screenshot of the
+       page gets an empty box. Read the pixels back in the SAME task as the
+       render instead: draw GL + HUD layers into a scratch 2D canvas, hand the
+       PNG to the DOM, and let --dump-dom carry it out. */
+    var cw=GL.width,chh=GL.height,cmp=document.createElement('canvas');
+    cmp.width=cw;cmp.height=chh;
+    var cx2=cmp.getContext('2d');
+    cx2.drawImage(GL,0,0,cw,chh);
+    cx2.drawImage(OV,0,0,cw,chh);/* HUD/mini-map layer, composited like on screen */
+    var shot=cmp.toDataURL('image/png');
+    /* --- player-visibility probe. The play scenario proves P.x/P.z and the
+       PROJECTION land dead centre; that is arithmetic, not pixels. The user's
+       "I see other people, but not the main character" is about pixels, so read
+       the pixels: sample the composited canvas at the exact screen centre and
+       dump everything that could keep the mesh from painting (visibility flag
+       from the spawn-invuln blink, world position, parent chain, the ortho
+       near/far planes vs his 0..1.76 m body, and the real camera position). */
+    try{
+      var pd=cx2.getImageData((cw>>1)-1,(chh>>1)-1,3,3).data;
+      R.shotPix=[pd[0],pd[1],pd[2],pd[3]];
+      var ppp=[];
+      for(var qi=0;qi<4;qi++){
+        var qx=(cw>>1)+(qi%2?18:-18),qy=(chh>>1)+(qi<2?-18:18);
+        var qd=cx2.getImageData(qx,qy,1,1).data;
+        ppp.push([qd[0],qd[1],qd[2]]);
+      }
+      R.shotPixRing=ppp;
+      var pgm=P.g,pb=null,tri=0;
+      if(pgm){
+        var walk=function(o){if(o.isMesh)tri++;for(var wi=0;wi<o.children.length;wi++)walk(o.children[wi]);};
+        walk(pgm);
+        /* Box3.setFromObject walks the geometry of every node it visits, but the
+           spawn blink may have him hidden on this very frame. Measure with every
+           flag forced on, then put them back exactly as they were. */
+        var pc=[];
+        pgm.traverse(function(o){pc.push([o,o.visible]);o.visible=true;});
+        pb=new THREE.Box3().setFromObject(pgm);
+        for(var pgi=0;pgi<pc.length;pgi++)pc[pgi][0].visible=pc[pgi][1];
+      }
+      /* No projAt here either -- the play scenario keeps its projector to itself. */
+      var pndc=null;
+      if(pgm){
+        camera.updateMatrixWorld(true);
+        pndc=new THREE.Vector3(pgm.position.x,pgm.position.y,pgm.position.z).project(camera);
+      }
+      R.shotPly={mode:P.mode,inv:Math.round(P.inv*100)/100,
+        gVis:pgm?(pgm.visible?1:0):-1,tri:tri,
+        gPos:pgm?[rr(pgm.position.x),rr(pgm.position.y),rr(pgm.position.z)]:null,
+        pPos:[rr(P.x),rr(P.y),rr(P.z)],
+        box:pb?[rr(pb.min.x),rr(pb.max.x),rr(pb.min.y),rr(pb.max.y),rr(pb.min.z),rr(pb.max.z)]:null,
+        inAct:ACT.indexOf(pgm)>=0?1:0,actN:ACT.length,
+        par:pgm&&pgm.parent?String(pgm.parent.type)+'#'+pgm.parent.children.length:'none',
+        sceneN:scene.children.length,
+        cam:[rr(camera.position.x),rr(camera.position.y),rr(camera.position.z)],
+        ortho:camera.isOrthographicCamera?1:0,
+        lr:camera.isOrthographicCamera?[rr(camera.left),rr(camera.right),rr(camera.top),rr(camera.bottom)]:null,
+        nf:[rr(camera.near),rr(camera.far)],zoom:rr(camera.zoom||1),
+        ndc:pndc?[rr(pndc.x),rr(pndc.y)]:null,
+        pxPly:pndc?[Math.round((pndc.x*0.5+0.5)*cw),Math.round((1-(pndc.y*0.5+0.5))*chh)]:null,
+        camFollow:[rr(CAM.x),rr(CAM.z)]};
+    }catch(e){R.shotPlyErr=(e.message||e)+'';}
+    var img=document.createElement('img');
+    img.id='shot';img.src=shot;
+    document.body.appendChild(img);
+    /* tryRender is declared inside the driver's own closure, so it is NOT
+       visible down here -- same trap as r1 above, and it silently cost R.shot
+       (the img painted first, then the object literal threw on this property).
+       renderer/scene/camera are game-scope vars, so reach for them directly. */
+    R.shot={mode:GS.mode,helpFrom:GS.helpFrom,ply:[rr(P.x),rr(P.z)],peds:PED.length,
+            cam:[rr(camera.position.x),rr(camera.position.y),rr(camera.position.z)],
+            ortho:camera.isOrthographicCamera?1:0,vieww:CFG.VIEWW,
+            size:[cw,chh],inner:[innerWidth,innerHeight],
+            pxLen:shot.length,
+            rend:(function(){try{renderer.render(scene,camera);return 'ok';}
+                              catch(e){return String(e.message||e);}})()};
+  }catch(e){R.shotErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+}
 try{
   var b1=document.getElementById('boot'),b2=document.getElementById('ov');
   if(b1)b1.style.display='none';if(b2)b2.style.display='none';
   var pre=document.createElement('pre');
   pre.id='out';pre.textContent='@@'+JSON.stringify(R)+'@@';
+  if(/[?&]shot=1/.test(location.search))pre.style.display='none';
   document.body.appendChild(pre);
 }catch(e){}
 })();

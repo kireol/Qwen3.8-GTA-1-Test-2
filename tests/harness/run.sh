@@ -3,7 +3,7 @@
 set -e
 R=$HOME/projects/gta1
 cd "$R"
-awk '/^<script>/{f=1;next}/^<\/script>/{f=0}f' src/gta1.html > /tmp/gta_extract.js
+awk '/^<script>/{f=1;next}/^<\/script>/{f=0}f' src/index.html > /tmp/gta_extract.js
 node --check /tmp/gta_extract.js && echo FULL_SYNTAX_OK
 cp tests/harness/mk_smoke.js tests/harness/rd.py tests/harness/three128.js /tmp/
 node /tmp/mk_smoke.js

@@ -1,23 +1,30 @@
-# PROJECT STATE — gta1 (web remake of Grand Theft Auto 1)
+# PROJECT STATE — Metro Mayhem (web remake of Grand Theft Auto 1)
 
-Last updated: 2026-11-07, **chunk 5 verified and committed**. The game now has its first real
-`requestAnimationFrame` loop and is ready for a **human browser playtest** (the one thing the
-headless harness structurally cannot cover). No remote — nothing is pushed.
+Last updated: 2026-11-07, **playtest-feedback round verified and ready to commit**. The user
+played the chunk-5 build and reported three things (A/D swapped — already fixed; "I see other
+people now, but not the main character"; camera tilted / too far out) plus three feature requests
+(rename `gta1.html`→`index.html` + de-GTA the strings, straight-down zoomed camera, a controls
+overlay). All are implemented and headlessly verified, including **the invisible-player bug, which
+was a real game bug** — see "Playtest-feedback round". No remote — nothing is pushed.
 
 ## Current state
-- Chunks 1–5 are all written, headlessly verified, and committed. `src/gta1.html` = **6323
-  lines** (`wc -l`), `node --check`-clean (`FULL_SYNTAX_OK`), tail `})();` / `</script>` /
-  `</body>` / `</html>`, last src line `if(!window.__GTA_TEST__)boot();`. Chunk 4c body starts
-  ~4560, chunk 5 body ~5739.
-- `tests/harness/mk_smoke.js` = **1070 lines** (all 3 planned chunk-5 edits applied).
-- Authoritative report: **`/tmp/run_c5c.txt`** (9663 frames). Gates:
+- `src/index.html` (renamed from `src/gta1.html`, rename is STAGED) = **6507 lines** (`wc -l`),
+  `node --check`-clean (`FULL_SYNTAX_OK`), tail `})();` / `</script>` / `</body>` / `</html>`,
+  last src line `if(!window.__GTA_TEST__)boot();`.
+- `tests/harness/mk_smoke.js` = **1470 lines** (PLAY-PROBE, HELP-PROBE, `?shot=1`/`?help=1`
+  screenshot hook and the scene-graph gates added since chunk 5).
+- Authoritative report: **`/tmp/run_ply.txt`** (9984 frames, post-fix). Gates:
   `missing {}` · `log []` · `errKinds {}` · `counts {errs:0, stepErrs:0, rendErrs:0, stop:false}`
-  · `audit0/audit2 bad:[]` · `nanTot` all 0 · `rsScan.n:0` · `render2:"ok"` · `per 0.51 ms/frame`.
+  · `c5.play.ok:true` (with `c5.play.ply.attach:1`, `inAct:1`) · `c5.help.ok:true`
+  · `c5.newgame {plyAttach:1, plyInAct:1, bad:0}` · `audit2 bad:[]` · `per 0.53 ms/frame`.
+- Previous authoritative report `/tmp/run_c5c.txt` (9663 frames) still documents chunk 5; it
+  **predates** the camera, rebrand, help-sheet and `clearActors` changes, so its `audit2 n:249`
+  and its city names (LIBERTY CITY / SAN ANDREAS) are historical.
 - The previous "CHECKPOINT — exact state if the session restarts right now" block (chunk 5
   unverified/uncommitted, `refs/wip/chunk5` as the recovery net, the pre-splice `/tmp` artifacts)
-  is **retired**: that tree is now committed, so `git show HEAD:src/gta1.html` *is* the verified
-  game (the newest commit is a docs-only follow-up that leaves src and the harness untouched).
-  `refs/wip/chunk5` → `0b68d96` is left in place; see "Git" for what it still uniquely holds.
+  is **retired**: that tree is now committed (`0229719` chunk 5, `871b51c` docs follow-up), so
+  `git show HEAD:src/index.html` *is* the last committed game. `refs/wip/chunk5` → `0b68d96` is
+  left in place; see "Git" for what it still uniquely holds.
 - **What the harness cannot prove, and only a human can:** whether the thing is *fun* and looks
   right — driving feel, spawn density, the `PtPool` `ShaderMaterial` particles, the audio graph,
   HUD legibility at real DPR, `GS.fps` and frame pacing on a real GPU.
@@ -25,12 +32,12 @@ headless harness structurally cannot cover). No remote — nothing is pushed.
   `z:-11.21`, deterministic across 3 runs; box `z` starts at `R0=-6.5`). Cars are held by the
   boundary colliders. Deferred deliberately — see "Outstanding".
 - **Reboot-safety / scratch policy:** nothing important lives in `/tmp`. The spliced copy inside
-  `src/gta1.html` is the source of truth for the game, `tests/harness/` holds the harness, and
-  `git show HEAD:src/gta1.html` reproduces the committed file byte-exactly. The old chunk-5
+  `src/index.html` is the source of truth for the game, `tests/harness/` holds the harness, and
+  `git show HEAD:src/index.html` reproduces the committed file byte-exactly. The old chunk-5
   authoring drafts (`/tmp/c5c.js` spliced, `/tmp/c5b.js` never spliced) are now redundant.
 
 ## Current objective (unchanged)
-Deliver ONE self-contained HTML file (`src/gta1.html`) that is a playable web version of
+Deliver ONE self-contained HTML file (`src/index.html`) that is a playable web version of
 Grand Theft Auto (1997), per `gtaprompt.png`:
 - Three.js **r128** loaded from **cdnjs** — the ONLY external dependency
 - **Everything else procedural at runtime** (geometry, textures, audio — no asset files)
@@ -44,8 +51,58 @@ Standing user instructions:
 - **"Are you updating PROJECT_STATE.md?"** → keep this file current *as work proceeds*, not
   only at the end. (In force permanently.)
 
+## Playtest-feedback round (the 5 changes since chunk 5, all verified)
+User's words: *"I think A and D keys are swapped. The game loads. I don't see any people yet"*,
+then *"Change the users view so the camera is directly overhead looking straight down instead of
+tilted, and zoom in closer. I see other people now, but not the main character."*, then the rename
+/ rebrand request, then *"please make it so pressing F12 will show the controls"*.
+
+1. **Invisible player — REAL BUG, root-caused.** `spawnPlayer()` (src 4477) registers the player
+   with `addActor(P.g)` (⇒ `scene.add` + `ACT.push`), but `newGame` calls `spawnPlayer` **before**
+   `populateCity()`, and `populateCity` opens with `clearActors()`, which did
+   `for(i...)scene.remove(ACT[i])` over the whole array — including `P.g` — and then truncated it.
+   Nothing re-added him, so from the *second* frame of the session onward the player was a
+   parentless `Group`: three.js silently skips parentless objects, while camera follow, physics,
+   collisions and the peds' flee logic all kept working on him. Hence "I see other people now, but
+   not the main character". Fix (src ~3763): `clearActors` skips `P.g` and re-registers it.
+   Nothing else iterates `ACT` (maintain uses VEH/PED), so he simply survives the rebuild.
+   **Why 5 earlier harness runs missed it:** every player gate was projection/physics *arithmetic*.
+   The gates that now pin this: `c5.play.ply.attach` (`P.g.parent===scene`), `c5.play.ply.inAct`,
+   and `c5.newgame.plyAttach`/`plyInAct` sampled right after `newGame(1)` — the exact path that
+   orphaned him. Corroborating: `audit2.n` 249 → **255** (the player's 6 unique material/geometry
+   combos are now present at audit time), and the `?shot=1` probe flipped from
+   `par:"none", inAct:0` to `par:"Scene#240", inAct:1`.
+   **The lesson, in one line: arithmetic was green while the pixels were empty — a screenshot is a
+   first-class gate, not a demo.** `shotPix` at screen centre went `[59,62,64]` (asphalt) →
+   `[60,51,43]` (jacket/head), and the centre crop shows a blue torso + dark head.
+2. **A/D swap + steering** — fixed in `53f78fc`/earlier; the PLAY-PROBE gate
+   `c5.play.walkOK`/`drive.rightTurnsClockwise` keeps it honest.
+3. **Crowd visible** — `CROWD={ped:32,veh:18}`, `DESP_R 118→52`, `SPAWN_MIN/MAX 38/64→28/40`,
+   `PED_MIN 10→6`; the old despawn radius streamed the crowd off-screen entirely. Gate
+   `c5.play.pedOK` requires ≥24 peds on screen, ≥20 distinct spots, nearest 5–12 m, median ≥16 px.
+4. **Camera** — `PLAYCAM` is now a straight-down **OrthographicCamera** (`up=(0,0,-1)`, basis set
+   in `camUpdate`), not a tilted perspective eye. `CFG.VIEWW` (now **46**) is the ONLY zoom knob
+   (`camFit` is the only writer of `VIEW`); `CFG.CAMH` does not frame an ortho camera, it only
+   clears the near plane above the tallest roof. Headless viewport is 1280×633 ⇒ `VIEW={x:23,
+   z:11.37}`, 27.8 px/m (depends only on canvas width). At 36 m the frame showed no rooftops;
+   the user picked 46 from 36/46/56/64.
+5. **Rename + rebrand** — `src/gta1.html` → **`src/index.html`** (`git mv`, rename staged; the
+   `.gitignore` comment and `run.sh`'s awk path follow it). Title/branding strings are now
+   **METRO MAYHEM**, logo mark **`MM`**, themes **MERIDIAN CITY** (was LIBERTY CITY) /
+   **PACIFIC CITY** (was SAN ANDREAS) / **PALM CITY** (was VICE CITY). Deliberately left alone
+   (user's "leave internals alone"): ~75 GTA-derived street/district/brand strings inside the
+   generator tables, the `window.__GTA_TEST__` opt-out, and 3 code comments that still say GTA.
+   The `MM` mark is confirmed painted in both screenshots.
+6. **Controls sheet** — the user asked for **F12**; F12/F1 are browser-reserved (DevTools / macOS
+   media key), so the sheet is on **`?`** (`e.code==='Slash'`) with a **permanent HUD chip**
+   (`drawHelpChip`, last paint of `drawHUD`) and a blinking `PRESS ? FOR CONTROLS` line on the
+   title card. `GS.helpFrom` restores the previous mode on close. Gate `c5.help.ok` (scenario 6.6)
+   checks the keydown is prevented, exactly one key (`Slash`) opens it, the sheet actually moves
+   ink on the overlay (`moved>8`), and the chip restores. Proven on screen: full CONTROLS table +
+   `? or ESC — Close this list` + `PRESS ? TO GO BACK`.
+
 ## Baseline checkpoint (chunk 4c — the run that predates chunk 5; kept for comparison only)
-At commit `7c03886` (5720 lines) `src/gta1.html` was `node --check`-clean (`FULL_SYNTAX_OK`) and
+At commit `7c03886` (5720 lines) `src/index.html` was `node --check`-clean (`FULL_SYNTAX_OK`) and
 the last full harness run (`/tmp/run_gun.txt`) was **clean**:
 ```
 missing {}   log []   errKinds {}
@@ -220,14 +277,40 @@ draws an **opaque** `#05070a` background then `css(TH.ground)`, so the old
 come from `kindAt(i,j)` over `[i*STRIDE+CFG.R1, CFG.MAX(i)-CFG.R1]`; `PARKBOX` is parked-car
 collision AABBs and is deliberately NOT used by the map.
 
-## Chunk 5 verified evidence (`/tmp/run_c5c.txt`, authoritative)
+## Playtest-round verified evidence (`/tmp/run_ply.txt`, AUTHORITATIVE)
+```
+FULL_SYNTAX_OK   smoke written, bytes=361127
+missing {}   log []   errKinds {}
+counts {errs:0, stepErrs:0, rendErrs:0, frames:9984, stop:false}
+per {frames:9984, ms:5303, msPerFrame:0.53}          # SwiftShader, not a GPU claim
+audit2 {n:255, bad:[]}                                # was 249 pre-fix: +6 player meshes visible
+c5.play {ok:true, err:none, walkOK:true, drive.rightTurnsClockwise:true,
+         ply:{ndc:[0,0], onScreen:1, centrePx:0, fpPx:18, attach:1, inAct:1}, plyOK:true,
+         ped:{onScreen:…, fp8:…, within18:…, spots:…, nearest:…, median:…, fpPxMedian:…}}
+c5.help {ok:true, moved>8, keys:['Slash'], Slash:true}
+c5.newgame {plyAttach:1, plyInAct:1, bad:0, city:1, mode:'play', …}
+```
+`?shot=1` probe (separate Chrome run over `file:///tmp/gta_smoke.html?shot=1`, dump-dom, extract
+`img#shot`): `shot {mode:'play', ply:[295,181.9], peds:32, cam:[295,90,181.9], ortho:1, vieww:46,
+size:[1280,633], rend:'ok'}` and
+`shotPly {mode:'foot', gVis:1, tri:7, gPos:[295,0,181.9], box:[294.6,295.4,0,1.8,181.4,182.4],
+inAct:1, actN:226, par:"Scene#240", sceneN:240, lr:[-23,23,11.4,-11.4], nf:[2,2000], zoom:1,
+ndc:[0,0], pxPly:[640,317]}`, `shotPix:[60,51,43,255]` at centre vs ring
+`[[54,57,59],[82,88,92],[58,61,63],[68,73,77]]` (asphalt). `shotErr` null.
+Screenshot on disk: **`/tmp/ply_fixed.png`** (1 265 509 B, 1280×633) — a blue torso + dark head
+sits exactly at screen centre, straddling the double yellow line; the same crop was empty asphalt
+before the fix. Earlier frames kept for reference: `/tmp/play46.png` (pre-fix, empty centre),
+`/tmp/v46b.png` (CONTROLS sheet), `/tmp/probe46.png` (pre-fix probe run).
+
+## Chunk 5 verified evidence (`/tmp/run_c5c.txt` — HISTORICAL, predates the camera/rebrand/`clearActors` work)
 All four green gates: `missing {}` · `log []` · `errKinds {}` ·
 `counts {errs:0,stepErrs:0,rendErrs:0,frames:9663,stop:false}`. Also `audit0 {n:6,bad:[],Mesh:324,Group:3}`,
 `audit2 {n:249,bad:[],Mesh:1023,Group:241}`, `nanTot {pos:0,uv:0,col:0,nrm:0,tris:0}`,
 `rsScan {n:0,r0:-6.5,wx:642.5,wz:406.5}`, `render2:"ok"`,
 `per {frames:9663,ms:4970,msPerFrame:0.51}` (**SwiftShader — NOT indicative of real-GPU perf**).
-Note `audit2` now audits **SAN ANDREAS** (rebuilt twice by `advanceCity()`/`newGame(1)`), so it is
-deliberately NOT comparable to the chunk-4c LIBERTY CITY baseline above.
+Note `audit2` now audits **SAN ANDREAS** (renamed **PACIFIC CITY** since; rebuilt twice by
+`advanceCity()`/`newGame(1)`), so it is deliberately NOT comparable to the chunk-4c
+LIBERTY CITY (now MERIDIAN CITY) baseline above.
 
 `R.c5` scenario block (each scenario records its own error keys; all `{}` in the green run):
 - **Input gate** — wraps `footMove`/`driveInput` with counting proxies, loops the 7 modes on foot
@@ -258,7 +341,37 @@ Gameplay keys stayed green through the splice: `guns {shots:10,kills:2,bulletsPe
 `deadNoContinue` both saturate at 7280 because the red wash covers the sampled grid, so the
 continue-prompt branch is **not** distinguished by the harness. `frac` only covers the 7 `MODES`.
 
-## Harness state (`tests/harness/mk_smoke.js`, 1070 lines)
+## Harness state (`tests/harness/mk_smoke.js`, 1470 lines)
+### New since the playtest round — read this before touching the driver
+- **Three new scenarios**, in driver order: **PLAY-PROBE** (`C.play`, ~1000–1225: walk direction,
+  clockwise turn, ped legibility, player centre+attach), **HELP-PROBE** (scenario 6.6, ~1240–1310),
+  **`newGame(1)` attach check** (scenario 7, ~1317–1341). The tail `?shot=1` / `?help=1` screenshot
+  hook sits after `R.per` and is the last thing before the report is written.
+- **Screenshot recipe (the only one that works).** Build with `run.sh` (or `cp tests/harness/*  /tmp
+  && node /tmp/mk_smoke.js`), then load `file:///tmp/gta_smoke.html?shot=1[&help=1]` with
+  `--dump-dom` and base64-extract `img#shot`:
+  `re.search(r'id="shot"[^>]*src="data:image/png;base64",…')` → 1 687 348 b64 chars → 1 265 509-byte
+  PNG. **`--screenshot` does NOT work** — it fires before the hook runs, so both attempts returned
+  the *same* 4250-byte all-black 1280×720 box; do not trust it as "the game renders black".
+  Parse the report in shot mode with `r'<pre id="out"[^>]*>(.*?)</pre>'` — the `[^>]*` is
+  **mandatory** there because that `pre` is written with `style="display:none"`.
+- **Driver-scope trap (bit me 3×: `r1`, `tryRender`, `projAt`).** The scenario helpers live in the
+  driver's own closure and are **not visible in the tail `?shot=1` hook**; a `ReferenceError` there
+  kills `R.shot` *silently* (it throws while building the object literal, after `img.src` was
+  already painted, so the screenshot looks fine and only `shotErr` tells the truth). Tail code must
+  use local helpers (`rr`, inline `new THREE.Vector3(...).project(camera)`, inline
+  `renderer.render(scene,camera)` in a try/catch — those three ARE game-scope `var`s).
+- **`slog` truncates at 200 chars** (`H.log.push(String(x).slice(0,200))`) ⇒ log *failures only*,
+  never a whole probe object, or the diagnostic is cut mid-field.
+- **Player-visibility gates are scene-graph gates, not projection gates.** `PL.plyOK` now requires
+  `attach===1 && inAct===1` on top of `onScreen/centrePx/fpPx`; projection was green for two windows
+  while the renderer never saw him. Scenario 7 re-checks it after the city rebuild.
+- **`timeout` is not installed on macOS** and chained `sleep` is blocked by the tool wrapper — poll
+  a sentinel (`; echo exit=$? > /tmp/x.status`) from a background shell instead.
+- Two Chromes must never run against the same `/tmp/gta_smoke.html` (each rewrites `/tmp/dom.html`);
+  give each its own `--user-data-dir` and output file, and never rebuild the page mid-run.
+
+### Carried from chunk 5 (still true)
 - Edit 1 applied (lines 7–10): after `s=s.replace(CDN,'three128.js')` the generated smoke HTML
   injects `<script>window.__GTA_TEST__=1;</script>` so `boot()` never runs and the driver keeps
   full control (no rAF loop racing it, no double `buildCity`). Order is safe: the inserted tag
@@ -324,45 +437,55 @@ continue-prompt branch is **not** distinguished by the harness. `frac` only cove
 ## Reproduce a report
 ```
 cd $HOME/projects/gta1
-sh tests/harness/run.sh log missing errKinds counts soak jobs driveFree topSpeed guns \
-  gunProbe police death crash runOver enter exit audit0 audit2 nanTot rsScan render2 per c5 \
-  > /tmp/run_c5c.txt 2>&1
+sh tests/harness/run.sh log missing errKinds counts c5 audit2 nanTot per \
+  > /tmp/run_ply.txt 2>&1          # run in background; ~70-90 s wall
 python3 /tmp/rd.py log missing errKinds counts c5 audit2 nanTot per
 ```
+The full key list still works too (it just prints more):
+`sh tests/harness/run.sh log missing errKinds counts soak jobs driveFree topSpeed guns \
+  gunProbe police death crash runOver enter exit audit0 audit2 nanTot rsScan render2 per c5`
 `c5` returns the whole nested scenario object (`rd.py` is top-level-only), which is the quickest
 way to re-inspect chunk-5 evidence without re-running. Use `is_background:true` — the run is
-~50 s wall.
+~70 s wall.
+To re-query an existing report without re-running, `python3 /tmp/rd.py <keys>` reads the persisted
+`/tmp/dom.html`. For the screenshot pass, `dom.html` is NOT the right file — re-dump with
+`?shot=1` into its own file and base64-extract `img#shot` (see the recipe in "Harness state").
 `run.sh <keys>` = awk-extract the inline script → `node --check` (prints `FULL_SYNTAX_OK`) →
 `cp tests/harness/{mk_smoke.js,rd.py,three128.js} /tmp` → `node /tmp/mk_smoke.js` (pre-compiles
 with `new vm.Script`, prints `smoke written, bytes=`) → Chrome `--headless=new --disable-gpu
 --use-angle=swiftshader --enable-unsafe-swiftshader --window-size=1280,720
 --virtual-time-budget=60000 --dump-dom` (cwd forced to `/tmp`: `three128.js` is a relative
 path) → `python3 /tmp/rd.py <keys>`. ~5 s of sim, 9663 frames, ~50 s wall.
-- Line mapping: harness-reported HTML line *N* == `src/gta1.html` line *N*. For
+- Line mapping: harness-reported HTML line *N* == `src/index.html` line *N*. For
   `/tmp/gta_extract.js` the offset is ≈ +28..32 (recompute by content match).
 - `audit()` dedupes by attr/itemSize/material ⇒ its `n=` is the FIRST offending tile.
 - `/tmp/missing.js` **HANGS (catastrophic backtracking) — do not run.**
 
 ## Outstanding / next actions
-1. **Chunk 5 — DONE, verified, committed.** All four green gates plus every `R.c5` assertion;
-   evidence in "Chunk 5 verified evidence" above.
-2. **The playtest is the user's, not the agent's.** Open `src/gta1.html` in a real browser
+1. **Playtest-feedback round — DONE, verified, about to be committed** (rename + rebrand, ortho
+   plan camera + `VIEWW:46`, crowd retune, `?` controls sheet + HUD chip, **invisible-player fix**).
+   Evidence: "Playtest-round verified evidence" above.
+2. **Chunk 5 — DONE, verified, committed** (`0229719`, docs follow-up `871b51c`).
+3. **The playtest is the user's, not the agent's.** Open `src/index.html` in a real browser
    (needs network for the cdnjs r128 tag; `boot()` runs normally there; audio unlocks on first
    `pointerdown`). **Never hand off `/tmp/gta_smoke.html`** — that copy carries the
    `__GTA_TEST__` injection and the driver, so it boots to a blank canvas. Things only a human
    can judge: driving feel, spawn density, mission flow, `crash peakShake`, and whether the HUD /
    map / title / pause / complete screens *say the right words* (the harness proves ink, not text).
-3. Still open from chunk 5's list:
+4. Still open from chunk 5's list:
    - **On-foot south escape:** `soak` leaves the player at `x:166.46 z:-11.21`, outside the world
      box (`R0=-6.5`). Deterministic — the same `-11.21` in three separate runs, so bounded rather
      than runaway. `footMove` **does** call `CITY.C.resolve(_pb,0.31)` (fn at src 4306, resolve at 4317) and the south
      wall **is** registered in `CITY.C` (src 1585–1588), so this is *not* "foot ignores colliders";
-     mechanism not yet diagnosed. Deliberately NOT fixed in the chunk-5 commit — physics changes
-     do not belong in the same commit as a large freshly-verified chunk right before a playtest.
+     mechanism not yet diagnosed. Deliberately NOT fixed in this commit either — physics changes
+     do not belong in the same commit as a rebrand + camera + render-graph change.
      Cars are fine (`edgeWest`/`edgeNorth` report `inWater:0`).
    - Perf: `populateCity` creates 208 vehicles / 190 park boxes; `maintain()` trims the active
-     set to ~27 veh / 26 ped. `per msPerFrame:0.51` at 1280×720 **SwiftShader** — proves nothing
+     set to ~27 veh / 26 ped. `per msPerFrame:0.53` at 1280×633 **SwiftShader** — proves nothing
      about a real GPU. Now that a real rAF loop exists, check `GS.fps` in a browser too.
+   - **Cosmetic, deliberately untouched:** `hd=mk(g.head,null)` in `makePlayer()` (src ~3447) gives
+     the head `MAT.pant` (dark navy) instead of a skin material, so from directly overhead the head
+     reads as a dark blob. Visible in the playtest screenshots; not worth a physics-adjacent commit.
 
 ## Known issues / blockers
 - `soak.hp` can drop ~60 over 2400 frames of throttle-and-turn driving (traffic damage). Not
@@ -378,28 +501,33 @@ path) → `python3 /tmp/rd.py <keys>`. ~5 s of sim, 9663 frames, ~50 s wall.
 - No git remote. Nothing is pushed anywhere.
 
 ## Git
-Branch `main`, identity `kireol / 3438792+kireol@users.noreply.github.com`, **no remote**.
-Recent (newest first — hashes deliberately not quoted here, `git log -n 1` is authoritative):
-**chunk 5** (HUD, map, screens, main loop, `boot()`, plus the 4 surgical src fixes),
-`7c03886` chunk 4c (weapons/wanted police/pickups/markers/missions), `53f78fc` boarding radius +
-throttle drag, `ba13cd0` NaN geometry + driving physics, `add6241` foot-velocity fix + island
-walls, `a4f538c` chunk 4b, `254dbcc` baseline (chunks 1–4a).
+Branch `main`, identity `kireol / 3438792+kireol@users.noreply.github.com`, **no remote** — nothing
+is ever pushed. Recent (newest first, `git log -n 3` is authoritative): `871b51c` PROJECT_STATE
+docs follow-up, `0229719` **chunk 5** (HUD, map, screens, main loop, `boot()`, +4 surgical src
+fixes), `7c03886` chunk 4c, `53f78fc` boarding radius + throttle drag, `ba13cd0` NaN geometry +
+driving physics, `add6241` foot-velocity fix + island walls, `a4f538c` chunk 4b, `254dbcc` baseline.
+**The playtest-feedback round is uncommitted as of this section** and consists of: `git mv
+src/gta1.html src/index.html` (already staged as a rename) + the rebrand strings, the ortho plan
+camera, `VIEWW:46`, the crowd retune, the `?` help machine, the `clearActors` fix, the two harness
+follow-ups (`.gitignore` comment and `run.sh`'s awk path both referenced `src/gta1.html`), plus
+this file.
 `refs/wip/chunk5` → `0b68d96` ("WIP on main: 7c03886") is the **pre-verification snapshot and is
 NOT an ancestor of main** (`git merge-base --is-ancestor` fails). Verified delta vs HEAD: exactly
 the `advanceCity()` cityScore fix in src, plus the 241-line `R.c5` harness block — i.e. it holds
 nothing unique, so `git update-ref -d refs/wip/chunk5` only discards the pre-fix variant.
-Every chunk staged **explicit paths only**: `src/gta1.html`, `tests/harness/mk_smoke.js`,
-`docs/agent/PROJECT_STATE.md`. **Never stage `tmp/` or `.qwen/skill-curator.json`**
-(pre-existing untracked scratch), never `git add -A`.
+Every chunk staged **explicit paths only**: `src/index.html`, `tests/harness/mk_smoke.js`,
+`tests/harness/run.sh`, `.gitignore`, `docs/agent/PROJECT_STATE.md`. **Never stage `tmp/` or
+`.qwen/skill-curator.json`** (pre-existing untracked scratch), never `git add -A`.
 
 ## Important files
-- `src/gta1.html` — the entire deliverable (**6323 lines** with chunk 5; tail is `})();`,
-  `</script>`, `</body>`, `</html>`). Chunk 4c body starts ~4560, chunk 5 body ~5739.
+- `src/index.html` — the entire deliverable (**6507 lines**; renamed from `src/gta1.html`; tail is
+  `})();`, `</script>`, `</body>`, `</html>`). Chunk 4c body starts ~4560, chunk 5 body ~5739.
 - `docs/agent/PROJECT_STATE.md` — this checkpoint.
-- `tests/harness/run.sh` — **one-command pipeline**; args are report keys. Read before
-  re-running anything by hand.
-- `tests/harness/mk_smoke.js` — the harness builder (**1070 lines**; chunk-5 scenario block
-  ~821–1045, `R.c5` set at 1045). Reads `three128.js` relative
+- `tests/harness/run.sh` — **one-command pipeline**; args are report keys; awk-extracts from
+  `src/index.html`. Read before re-running anything by hand.
+- `tests/harness/mk_smoke.js` — the harness builder (**1470 lines**; chunk-5 scenario block
+  ~821–1045, PLAY-PROBE ~1000–1225, HELP-PROBE ~1240–1310, `newGame(1)`+attach ~1317–1341,
+  `R.c5` set ~1343, `?shot=1` hook in the report tail). Reads `three128.js` relative
   to cwd, writes `/tmp/gta_smoke.html`. The driver is spliced **at the end of the game script**
   (before `})();`), and the whole file is one strict-mode *classic script*, so game
   `var`/`function` declarations are real global-object properties — that is what lets the driver
@@ -410,16 +538,23 @@ Every chunk staged **explicit paths only**: `src/gta1.html`, `tests/harness/mk_s
 - `tests/harness/undeclared.js` — strict-mode undeclared-assignment heuristic; run it **after**
   `run.sh` (it reads `/tmp/gta_extract.js`).
 - `tests/harness/three128.js` — three.js r128 min (603445 B), gitignored; refetch from the
-  cdnjs r128 URL in `src/gta1.html` if missing.
+  cdnjs r128 URL in `src/index.html` if missing.
 - `.qwen/tmp/clips/seg*.mp4` — sampled reference footage. `docs/images/` — empty.
 - Scratch in `/tmp` (may not survive reboot): `gta_extract.js`, `gta_smoke.html`, `dom.html`,
-  `chrome.err`, `run_c5c.txt` (**authoritative chunk-5 report**), `run_c5b.txt` / `run_c5.txt` /
-  `run_gun.txt` (earlier reports), `run_keys.txt`, `mk_smoke.js`, `rd.py`,
-  `three128.js`.
+  `chrome.err`, `run_ply.txt` (**authoritative current report**), `ply_fixed.png`
+  (**post-fix play screenshot, 1.27 MB**), `shotdom3.html` (its dump), `shot3.status`,
+  `chrome_shot3.err`, `play46.png` / `probe46.png` / `shotdom2.html` / `playdom.html` (pre-fix
+  frames + probes), `v46b.png` / `shotdom.html` (CONTROLS-sheet frame), `run_c5c.txt`
+  (chunk-5 report), `run_c5b.txt` / `run_c5.txt` / `run_gun.txt` (earlier reports),
+  `mk_smoke.js`, `rd.py`, `three128.js`.
 
 ## Next action
-**Handoff — waiting on the user's browser playtest.** Chunk 5 is verified and committed; nothing
-in the repo is mid-flight. When playtest feedback arrives, triage it against the deferred list in
-"Outstanding" (on-foot south escape, real-GPU perf / `GS.fps`, `PtPool` ShaderMaterial look,
-audio graph, on-screen wording). For any fix that touches physics or the world sim, re-run
-`sh tests/harness/run.sh … c5` and require the four green gates before committing.
+**Playtest-feedback round is verified; commit it (explicit paths, no push — there is no remote),
+then hand the new build back to the user for a second browser pass.** The things his eyes are still
+the only instrument for: whether `VIEWW:46` feels right at a real window size and DPR, whether the
+dark head material reads as a head, `GS.fps` on a real GPU, the `PtPool` look, and the audio graph.
+The one known live bug to triage next is the **on-foot south escape** (`soak z:-11.21`) — it needs a
+physics diagnosis, not a guess, and it must be a separate commit. For any fix that touches physics
+or the world sim, re-run `sh tests/harness/run.sh … c5` and require the green gates **plus**
+`c5.play.ply.attach:1` and `c5.newgame.plyAttach:1`, and take a `?shot=1` frame: arithmetic was
+green for two windows while the player was invisible.
