@@ -539,7 +539,9 @@ Every chunk staged **explicit paths only**: `src/index.html`, `tests/harness/mk_
   `run.sh` (it reads `/tmp/gta_extract.js`).
 - `tests/harness/three128.js` — three.js r128 min (603445 B), gitignored; refetch from the
   cdnjs r128 URL in `src/index.html` if missing.
-- `.qwen/tmp/clips/seg*.mp4` — sampled reference footage. `docs/images/` — empty.
+- `.qwen/tmp/clips/seg*.mp4` — sampled reference footage. `docs/images/` — the three frames the
+  README embeds (`gameplay-plan-view.png`, `controls-sheet.png`, `invisible-player-before.png`),
+  all 1280×633, committed.
 - Scratch in `/tmp` (may not survive reboot): `gta_extract.js`, `gta_smoke.html`, `dom.html`,
   `chrome.err`, `run_ply.txt` (**authoritative current report**), `ply_fixed.png`
   (**post-fix play screenshot, 1.27 MB**), `shotdom3.html` (its dump), `shot3.status`,
@@ -549,10 +551,13 @@ Every chunk staged **explicit paths only**: `src/index.html`, `tests/harness/mk_
   `mk_smoke.js`, `rd.py`, `three128.js`.
 
 ## Next action
-**Playtest-feedback round is verified; commit it (explicit paths, no push — there is no remote),
-then hand the new build back to the user for a second browser pass.** The things his eyes are still
-the only instrument for: whether `VIEWW:46` feels right at a real window size and DPR, whether the
-dark head material reads as a head, `GS.fps` on a real GPU, the `PtPool` look, and the audio graph.
+**Playtest-feedback round is committed (`08b812c`). README.md + the three `docs/images/` frames are
+committed next, then push to `https://github.com/kireol/Qwen3.8-GTA-1-Test-2` (user-authorized for
+that one URL). Push rule: fast-forward only — `git remote add origin` + `git fetch` first, and if the
+remote is non-empty and not an ancestor of HEAD, stop and report rather than force.** The things his
+eyes are still the only instrument for: whether `VIEWW:46` feels right at a real window size and DPR,
+whether the dark head material reads as a head, `GS.fps` on a real GPU, the `PtPool` look, and the
+audio graph.
 The one known live bug to triage next is the **on-foot south escape** (`soak z:-11.21`) — it needs a
 physics diagnosis, not a guess, and it must be a separate commit. For any fix that touches physics
 or the world sim, re-run `sh tests/harness/run.sh … c5` and require the green gates **plus**
