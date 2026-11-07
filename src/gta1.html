@@ -4273,6 +4273,8 @@ function populateCity(){
   spawnParked();
   spawnTraffic(CROWD.veh);
   spawnPeds(CROWD.ped);
+  spawnCityPickups();
+  resetCityJobs();
 }
 function maintain(dt){
   CROWD.t-=dt;
@@ -4529,6 +4531,11 @@ function stepWorld(dt){
   stepDeadBodies(dt);
   coolWanted(dt);
   maintain(dt);
+  bulletsStep(dt);
+  policeTick(dt);
+  missionStep(dt);
+  pickupsStep(dt);
+  markersStep(dt);
   syncPlayer(dt);
   camUpdate(dt);
   engineAudio(dt);
@@ -4550,7 +4557,1159 @@ function vehImpact(v,dv,nx,nz,dt){
   if(u.flash<=0){u.flash=0.25;vehDamage(v,(dv-1.4)*2.2,u.x-nx,u.z-nz,'wall');}
   if(u.role==='player'&&dv>7.5)hurtPlayer((dv-7.5)*0.45,true);
 }
-/*__CHUNK__*/
+/* ===== chunk 4c: weapons, wanted-level police, pickups, markers, missions ===== */
+/* ============================================================================
+   CHUNK 4c -- guns, police, traffic AI, pickups, markers, death, missions.
+
+   Everything the already-written 4b code reaches for by name lives here:
+   syncCase aiDrive aiPed policeAlarm tryFire dropMoney killPlayer
+   bullets markers pickups markersClear() pickupsClear()
+   plus the five stepWorld() hooks:
+     bulletsStep policeTick missionStep pickupsStep markersStep
+
+   Conventions inherited from 4b (do not re-derive them here):
+   - actor state lives in userData, mesh yaw = -a, heading a => fwd=(cos a,sin a),
+     the driver's right of that heading is (sin a,-cos a);
+   - dist2() is LINEAR distance, not squared;
+   - laneTarget(i,j,ax,dir,off) returns {x,z}; roadSnap() returns a RANDOM dir,
+     so AI must derive its dir from its own heading;
+   - maintain() owns despawn (removeActor), the main loop owns GS.msgT/bigT/fade
+     decay -- nothing here may touch either;
+   - police vehicles are VK kind VCOP, their lightbar lenses are
+     userData.lights=[MAT.red mesh, MAT.blue mesh], and those two materials are
+     SHARED across all cop cars, so flashing has to go through .visible.
+   ========================================================================= */
+
+var bullets=null,markers=null,pickups=null;   /* read by clearActors() */
+
+/* Chunk-local clock and timers. GS.clock/GS.t are not incremented by anyone
+   until chunk 5's main loop, so 4c cannot use them for its own cadence. */
+var C4C={t:0,pol:0,sir:0,die:0,bust:0,job:0,fail:0,ph:0,kt:0};
+function c4tick(dt){
+  C4C.t+=dt;
+  var k;
+  for(k in C4C)if(k!=='t'&&C4C[k]>0)C4C[k]-=dt;
+}
+
+/* ------------------------------------------------------ 4c-only materials
+   Created at load, before the harness's audit/matProbe pass, so they get the
+   same NaN/probe coverage as everything else. None of them use vertexColors:
+   the Builder colour attribute is deliberately ignored in favour of a flat
+   colour, which is what makes a pickup read as a pickup. */
+(function mats4c(){
+  var lam=function(h){return new THREE.MeshLambertMaterial({color:h});};
+  var lit=function(h){return new THREE.MeshBasicMaterial({color:h});};
+  var beam=function(h,o){
+    return new THREE.MeshBasicMaterial({color:h,transparent:true,opacity:o,
+      side:THREE.DoubleSide,depthWrite:false});
+  };
+  MAT.cash=lam(0xf0b429);
+  MAT.heal=lam(0x4ad27a);
+  MAT.armor=lam(0xd2d9e2);
+  MAT.ammo=lam(0xd8a12a);
+  MAT.tracer=lit(0xffe066);
+  MAT.mk=[beam(0x39d7ff,0.30),beam(0xffc83a,0.34),beam(0xff3a3a,0.30),
+          beam(0x53e08a,0.32)];
+})();
+
+/* --------------------------------------------------------------- 4c hooks */
+/* hook 1 of 5: clock, weapon keys, bullet pool, and the player-position fix. */
+function bulletsStep(dt){
+  c4tick(dt);
+  /* P.x/P.z are otherwise frozen at the boarding point: syncVeh() only writes
+     the vehicle, while camUpdate(), wanted, pickups and the mission checks all
+     read the player position. This runs after the actor loop and before
+     camUpdate(), so the camera follows with one frame of lag. */
+  if(P.mode==='veh'&&P.veh){
+    var pu=P.veh.userData;
+    P.x=pu.x;P.z=pu.z;P.y=pu.y;
+  }
+  if(GS.mode==='play')weaponKeys();
+  if(bullets)bullets.step(dt);
+  syncCase();
+}
+
+/* ================================================================ the case
+   A 'deliv' bank job carries a briefcase that rides beside the driver. Built
+   once per city and only shown when the active objective needs it. */
+var caseGrp=null;
+function syncCase(){
+  var m=GS.mission,need=!!(m&&m.case&&!m.caseDropped);
+  if(need&&!caseGrp){caseGrp=makeBriefcase();scene.add(caseGrp);}
+  else if(!need&&caseGrp){scene.remove(caseGrp);caseGrp=null;}
+  if(!caseGrp)return;
+  var hx,hz,y,ry;
+  if(P.mode==='veh'&&P.veh){
+    var u=P.veh.userData,f=Math.cos(u.a),g=Math.sin(u.a);
+    hx=u.x+f*0.10+g*0.44;hz=u.z+g*0.10-f*0.44;
+    y=u.y+0.50;ry=-u.a;
+  }else{
+    var f2=Math.cos(P.a),g2=Math.sin(P.a);
+    hx=P.x+f2*0.40+g2*0.34;hz=P.z+g2*0.40-f2*0.34;
+    y=P.y+0.44;ry=-P.a;
+  }
+  if(!isFinite(hx)||!isFinite(hz)||!isFinite(y)){caseGrp.visible=false;return;}
+  caseGrp.visible=true;
+  caseGrp.position.set(hx,y,hz);
+  caseGrp.rotation.y=ry;
+}
+
+/* ============================================================== gunshots */
+function BulletPool(cap){
+  var g=new THREE.CylinderGeometry(0.05,0.05,1,5);
+  g.translate(0,0.5,0);
+  var im=new THREE.InstancedMesh(g,MAT.tracer,cap);
+  im.frustumCulled=false;im.name='bullets';
+  scene.add(im);
+  var b=[],i;
+  var mm=new THREE.Matrix4(),q=new THREE.Quaternion(),sv=new THREE.Vector3(),
+      pv=new THREE.Vector3(),up=new THREE.Vector3(0,1,0),dir=new THREE.Vector3();
+  function park(j){
+    mm.compose(pv.set(0,-60,0),q,sv.set(0.001,0.001,0.001));
+    im.setMatrixAt(j,mm);
+  }
+  for(i=0;i<cap;i++){
+    b.push({on:0,x:0,y:0,z:0,vx:0,vy:0,vz:0,t:0,L:1,dmg:1,r:0.2,rock:0,
+            hid:1,f:'p',own:null});
+    park(i);
+  }
+  im.instanceMatrix.needsUpdate=true;
+  return {
+    obj:im,
+    count:function(){var c=0,j;for(j=0;j<cap;j++)if(b[j].on)c++;return c;},
+    fire:function(x,y,z,a,sp,dmg,L,spread,rock,own,fac){
+      var s=null,j;
+      for(j=0;j<cap;j++)if(!b[j].on){s=b[j];break;}
+      if(!s)return 0;
+      var aa=a+(Math.random()*2-1)*(spread||0.02);
+      s.on=1;s.t=0;s.x=x;s.y=y;s.z=z;
+      s.vx=Math.cos(aa)*sp;s.vz=Math.sin(aa)*sp;
+      s.vy=(Math.random()-0.5)*sp*0.02+(rock?0.9:0.05);
+      s.L=L||1;s.dmg=dmg;s.rock=rock?1:0;s.own=own||null;s.f=fac||'p';
+      return 1;
+    },
+    step:function(dt){
+      var SUB=2,fd=dt/SUB,k,j,n=0;
+      for(k=0;k<SUB;k++){
+        for(j=0;j<cap;j++){
+          var s=b[j];
+          if(!s.on)continue;
+          if(s.rock)s.vy-=9.4*fd;
+          var bx=s.x+s.vx*fd,bz=s.z+s.vz*fd,by=s.y+s.vy*fd;
+          s.t+=fd;
+          if(s.t>=s.L||by<0.04||by>90){s.on=0;continue;}
+          /* blocked(x,z,h,m): h is the bullet's own height, so a low fence
+             stops a pistol bolt but a rocket flown over it still lands. */
+          if(CITY.C.blocked(bx,bz,Math.min(by,3.0),0.15)){
+            impact(s,bx,by,bz,1);continue;
+          }
+          /* mid + end sampling: a uzi bolt moves 0.93 m per substep, so an
+             endpoint-only test tunnels straight through a 0.42 m ped hitbox. */
+          if(hitOne(s,(s.x+bx)*0.5,(s.y+by)*0.5,(s.z+bz)*0.5)){
+            impact(s,(s.x+bx)*0.5,(s.y+by)*0.5,(s.z+bz)*0.5,0);continue;}
+          if(hitOne(s,bx,by,bz)){impact(s,bx,by,bz,0);continue;}
+          s.x=bx;s.y=by;s.z=bz;
+        }
+      }
+      for(j=0;j<cap;j++){
+        var s2=b[j];
+        if(!s2.on){if(s2.hid!==1){s2.hid=1;park(j);}continue;}
+        s2.hid=0;
+        dir.set(s2.vx,s2.vy,s2.vz);
+        if(dir.lengthSq()<1e-8)dir.set(1,0,0);
+        dir.normalize();
+        q.setFromUnitVectors(up,dir);
+        sv.set(s2.rock?0.26:0.075,s2.rock?1.5:0.62,s2.rock?0.26:0.075);
+        pv.set(s2.x,s2.y,s2.z);
+        mm.compose(pv,q,sv);
+        im.setMatrixAt(j,mm);
+        n++;
+      }
+      im.instanceMatrix.needsUpdate=true;
+      im.visible=n>0;
+    },
+    clear:function(){
+      for(var j=0;j<cap;j++){b[j].on=0;b[j].hid=1;park(j);}
+      im.instanceMatrix.needsUpdate=true;im.visible=false;
+    }
+  };
+}
+function gun(){
+  if(!bullets)bullets=BulletPool(320);
+  return bullets;
+}
+function impact(s,bx,by,bz,wall){
+  s.on=0;
+  if(s.rock){explode(bx,Math.max(by,0.35),bz,5.2,s.dmg,'rocket');return;}
+  burst(bx,by,bz,3,2.6,'spark',0.28,0.10,0.32,[1,0.88,0.5],[1,0.3,0.05]);
+  if(wall)puff(bx,by,bz,3,1.4,0.3,0.06,0.2,[0.6,0.58,0.55],[0.25,0.24,0.23],
+               'dust',2.5,0.6);
+  SND.tick();
+}
+/* Actors only: walls are the caller's problem (blocked()). s.f is 'p' for the
+   player's side, 'c' for the cops, and the same-faction skip is what stops a
+   cop bullet wounding the cop who fired it. */
+function hitOne(s,bx,by,bz){
+  var j,a,ur,d,best=null,bd=1e9,bk='';
+  if(s.f==='c'&&GS.mode==='play'){
+    if(P.mode!=='veh'){
+      if(dist2(bx,bz,P.x,P.z)<0.34){hurtPlayer(s.dmg,false);return 'p';}
+    }else if(P.veh&&s.own!==P.veh){
+      var pu2=P.veh.userData;
+      if(dist2(bx,bz,pu2.x,pu2.z)<(pu2.lenr+pu2.winr)*0.32+0.25){
+        vehDamage(P.veh,s.dmg*0.6,bx,bz,'bullet');return 'v';
+      }
+    }
+  }
+  for(j=0;j<PED.length;j++){
+    a=PED[j];ur=a.userData;
+    if(!ur.alive)continue;
+    if(a===s.own||(s.f==='c'&&ur.kind==='cop'))continue;
+    if(Math.abs(by-ur.y-0.9)>1.15)continue;
+    d=dist2(bx,bz,ur.x,ur.z)-0.42;
+    if(d<0&&d<bd){bd=d;best=a;bk='ped';}
+  }
+  for(j=0;j<VEH.length;j++){
+    a=VEH[j];ur=a.userData;
+    if(!ur.alive||ur.state==='gone'||ur.state==='wreck')continue;
+    if(a===s.own)continue;
+    if(s.f==='c'&&ur.role==='police')continue;
+    if(s.f==='p'&&P.veh===a)continue;
+    d=dist2(bx,bz,ur.x,ur.z)-((ur.lenr+ur.winr)*0.32+0.2);
+    if(d<0&&d<bd){bd=d;best=a;bk='veh';}
+  }
+  if(!best)return null;
+  var uu=best.userData;
+  if(bk==='ped'){
+    var was=uu.alive;
+    killPed(best,s.rock?120:s.dmg);
+    burst(bx,uu.y+1.0,bz,4,2.6,'bloodP',0.45,0.14,0.6,[0.8,0.09,0.07],
+          [0.35,0.02,0.02]);
+    if(s.f==='p'){
+      crime(s.rock?2.2:0.5,uu.x,uu.z);
+      if(was&&!uu.alive){GS.score+=30;sndKill();}
+      panicNear(uu.x,uu.z,11);
+    }else if(!uu.alive&&GS.wanted<6)crime(0.35,uu.x,uu.z);
+  }else{
+    vehDamage(best,s.rock?s.dmg:s.dmg*0.55,bx,bz,'bullet');
+    if(s.f==='p'){
+      crime(s.rock?1.6:0.35,uu.x,uu.z);
+      if(uu.role==='police'&&uu.state==='wreck')GS.score+=120;
+    }
+  }
+  return bk;
+}
+function sndKill(){
+  if(C4C.kt>0)return;
+  C4C.kt=0.12;SND.thud();
+}
+
+/* ---------------------------------------------------------------- firing */
+function ammoLeft(w){return w<=0?999:(GS.ammo[w]|0);}
+function spendAmmo(w){if(w>0&&GS.ammo[w]>0)GS.ammo[w]--;}
+function giveAmmo(w,n){
+  if(w<1||w>4)return;
+  GS.ammo[w]=Math.min(WDEF[w].cap,(GS.ammo[w]|0)+(n|0));
+  if(GS.ammo[GS.wp|0]<=0)setWpn(w);
+}
+/* Nothing else in the file sets GS.wp, so 4c owns the weapon keys. */
+function weaponKeys(){
+  var i;
+  for(i=1;i<=5;i++)if(jp('w'+i)){setWpn(i-1);return;}
+  if(jp('wp')){
+    for(i=1;i<=4;i++){
+      var n=(GS.wp+i)%5;
+      if(GS.ammo[n]>0){setWpn(n);return;}
+    }
+    setWpn((GS.wp+1)%5);
+  }
+}
+function setWpn(w){
+  if(w<0||w>4||w===GS.wp)return;
+  GS.wp=w;
+  P.fireCd=Math.max(P.fireCd||0,0.2);
+  say(WNAME[w],1.1);SND.menu();
+}
+function gunPos(){
+  if(P.mode==='veh'&&P.veh){
+    var u=P.veh.userData,f=Math.cos(u.a),g=Math.sin(u.a);
+    return {x:u.x+f*u.lenr*0.5+g*u.winr*0.7,z:u.z+g*u.lenr*0.5-f*u.winr*0.7,
+            y:u.y+(u.roofY?u.roofY+0.10:1.05),a:u.a,car:1,veh:P.veh};
+  }
+  var f2=Math.cos(P.a),g2=Math.sin(P.a);
+  return {x:P.x+f2*0.55+g2*0.24,z:P.z+g2*0.55-f2*0.24,y:P.y+1.24,
+          a:P.a,car:0,veh:null};
+}
+function tryFire(dt){
+  if(GS.mode!=='play'||C4C.die>0)return;
+  if(P.fireCd===undefined)P.fireCd=0;
+  P.fireCd-=dt;
+  if(jp('fire'))P.fireCd=Math.max(P.fireCd,0);
+  if(P.fireCd>0)return;
+  var w=GS.wp,d=WDEF[w];
+  if(!d)return;
+  if(!d.melee&&ammoLeft(w)<=0){
+    say('NO AMMO',1.1);
+    for(var i=1;i<5;i++)if(GS.ammo[i]>0){setWpn(i);return;}
+    setWpn(0);
+    P.fireCd=0.5;
+    return;
+  }
+  var g=gunPos();
+  /* WDEF.rate is already seconds-between-shots (uzi 0.085), not a fire rate:
+     1/rate here made the uzi crawl at one shot per 2.5 s. */
+  P.fireCd=Math.max(0.05,d.rate);
+  if(d.melee){meleeSwing(d);return;}
+  spendAmmo(w);
+  var n=Math.max(1,d.pellets|0),k;
+  for(k=0;k<n;k++)
+    gun().fire(g.x,g.y,g.z,g.a,d.spd,d.dmg,d.life,d.spread,d.boom?1:0,
+               g.veh,'p');
+  SND.gunshot(d.snd||'default');
+  GS.camShake=Math.min(1.4,GS.camShake+(d.boom?0.30:(n>1?0.13:0.055)));
+  if(g.car&&P.veh){
+    var pu=P.veh.userData,kk=d.boom?1.6:0.28;
+    pu.vx-=Math.cos(g.a)*kk;pu.vz-=Math.sin(g.a)*kk;
+  }
+  crime(d.boom?2.6:0.5,g.x,g.z);
+  panicNear(g.x,g.z,d.boom?14:9);
+}
+function meleeSwing(d){
+  var r=1.55,j,hx=P.x+Math.cos(P.a)*0.8,hz=P.z+Math.sin(P.a)*0.8,got=0;
+  for(j=0;j<PED.length;j++){
+    var q=PED[j],qu=q.userData;
+    if(!qu.alive)continue;
+    if(dist2(qu.x,qu.z,hx,hz)<r){killPed(q,d.dmg);got=1;}
+  }
+  for(j=0;j<VEH.length;j++){
+    var v=VEH[j],vu=v.userData;
+    if(!vu.alive||vu.state==='gone'||vu.state==='wreck'||v===P.veh)continue;
+    if(dist2(vu.x,vu.z,hx,hz)<r+vu.winr)vehDamage(v,d.dmg*0.6,hx,hz,'melee');
+  }
+  puff(hx,P.y+1.0,hz,3,1.1,0.3,0.1,0.25,[0.5,0.5,0.5],[0.2,0.2,0.2],'dust',2,0.5);
+  if(got){crime(0.7,hx,hz);panicNear(hx,hz,9);SND.thud();}
+  else GS.camShake=Math.min(1.2,GS.camShake+0.03);
+}
+function panicNear(x,z,r){
+  for(var j=0;j<PED.length;j++){
+    var q=PED[j],qu=q.userData;
+    if(!qu.alive||qu.kind==='cop'||qu.flee>0)continue;
+    if(dist2(qu.x,qu.z,x,z)<r){
+      qu.st='flee';qu.flee=8+Math.random()*4;
+      qu.tx=qu.x+(qu.x-x)+(Math.random()-0.5)*10;
+      qu.tz=qu.z+(qu.z-z)+(Math.random()-0.5)*10;
+    }
+  }
+}
+
+/* ------------------------------------------------------- money and health */
+function dropMoney(x,z,money){if(money>0)spawnPickup('cash',x,z,money);}
+/* ================================================================ police */
+/* crime() calls this on every single offence while wanted, so it has to be
+   the throttled entry point; the real top-up cadence lives in policeTick. */
+function policeAlarm(){
+  if(C4C.pol>0||GS.mode!=='play'||GS.wanted<=0)return;
+  C4C.pol=0.9;
+  spawnPolice();
+}
+function copCap(){return Math.min(4,GS.wanted+(GS.wanted>=4?1:0));}
+function countPolice(){
+  var n=0;
+  for(var j=0;j<VEH.length;j++){
+    var u=VEH[j].userData;
+    if(u.role==='police'&&u.alive&&u.state!=='gone'&&u.state!=='wreck')n++;
+  }
+  return n;
+}
+function spawnPolice(){
+  var have=countPolice(),need=copCap()-have,j;
+  if(need<=0)return;
+  for(j=0;j<need;j++){
+    var p=roadSpawnPoint(38,64);
+    if(!p)continue;
+    var v=regVeh(makeVehicle(VCOP,null),p.x,p.z,headingOf(p)),u=v.userData;
+    u.i=p.i;u.j=p.j;u.ax=p.ax;u.dir=p.dir;u.off=p.off;
+    u.role='police';u.state='drive';u.stuck=0;
+    u.hp=Math.max(u.hp,150);
+    u.fireCd=1.4+Math.random();
+    var lt=laneTarget(p.i,p.j,p.ax,p.dir,p.off);
+    u.tx=lt.x;u.tz=lt.z;
+  }
+}
+function spawnCopPed(){
+  var p=roadSpawnPoint(26,52);
+  if(!p)return;
+  var q=regPed(makePed(1,rdi(SKINS.length),6),p.x,p.z,headingOf(p)),u=q.userData;
+  u.kind='cop';u.hp=52;u.spd=3.4;u.fireCd=1.2+Math.random();
+  u.tx=p.x;u.tz=p.z;
+}
+function demotePolice(){
+  var j,v,u;
+  for(j=0;j<VEH.length;j++){
+    v=VEH[j];u=v.userData;
+    if(u.role!=='police')continue;
+    u.role='civ';u.thr=0;
+    if(u.lights){u.lights[0].visible=false;u.lights[1].visible=false;}
+  }
+  for(j=0;j<PED.length;j++){
+    u=PED[j].userData;
+    if(u.kind!=='cop')continue;
+    u.kind='civ';u.spd=1.1+Math.random()*0.5;
+  }
+}
+/* hook 2 of 5: lenses, siren, top-up cadence, cop foot patrols, busting. */
+function policeTick(dt){
+  var j,v,u,nCop=0,nPed=0;
+  var ph=(((C4C.t*3)|0)%2)===0;
+  for(j=0;j<VEH.length;j++){
+    v=VEH[j];u=v.userData;
+    if(u.role!=='police'||!u.lights)continue;
+    if(!u.alive||u.state==='gone'||u.state==='wreck'){
+      u.lights[0].visible=false;u.lights[1].visible=false;continue;
+    }
+    nCop++;
+    u.lights[0].visible=ph;u.lights[1].visible=!ph;
+  }
+  for(j=0;j<PED.length;j++){
+    u=PED[j].userData;
+    if(u.alive&&u.kind==='cop')nPed++;
+  }
+  if(GS.wanted<=0||GS.mode!=='play'){
+    if(nCop||nPed)demotePolice();
+    return;
+  }
+  if(nCop&&C4C.sir<=0){C4C.sir=0.62;SND.siren(nCop>1);}
+  if(C4C.pol<=0){
+    C4C.pol=Math.max(1.2,4.6-GS.wanted*0.55);
+    spawnPolice();
+    if(GS.wanted>=3&&nPed<Math.min(6,GS.wanted-1)&&Math.random()<0.7)
+      spawnCopPed();
+  }
+  bustCheck(dt);
+}
+/* ram at 1-2 stars, box in and shoot at 3+. Cops deliberately ignore the
+   ahead-of-them traffic test: a cop that brakes for every taxi never catches
+   anyone, and collideAllVeh() sorts out the denting. */
+function aiCop(v,dt){
+  var u=v.userData,d=u.d;
+  var lv=(P.mode==='veh'&&P.veh)?P.veh.userData:P;
+  var dd=dist2(u.x,u.z,P.x,P.z),sp=Math.abs(u.speed);
+  if(dd>120){cruise(v,dt,1);return;}
+  var lead=clamp(dd/26,0,1.4);
+  var axy=P.x+(lv.vx||0)*lead,azy=P.z+(lv.vz||0)*lead;
+  var ta=Math.atan2(azy-u.z,axy-u.x),err=angDiff(ta,u.a);
+  u.steer+=(clamp(-err*1.9,-1,1)-u.steer)*Math.min(1,dt*6);
+  if(Math.abs(err)>2.1&&sp<4)u.thr=-0.7;
+  else if(dd<7.5&&sp>9)u.thr=-0.5;
+  else u.thr=approach(u.thr,(dd>9?1:0.35),dt*2.6);
+  var lim=d.top*(GS.wanted>=3?0.95:1.02);
+  if(sp>lim)u.thr=Math.min(u.thr,0.15);
+  if(CITY.C.blocked(u.x+Math.cos(u.a)*3.2,u.z+Math.sin(u.a)*3.2,1.9,0.15)&&
+     sp>1.5)u.thr=Math.min(u.thr,-0.4);
+  if(Math.abs(u.speed)<0.6&&u.thr>0.4)u.stuck+=dt;
+  else u.stuck=Math.max(0,u.stuck-dt);
+  if(u.stuck>1.8){u.stuck=0;u.revT=0.8;}
+  if(u.revT>0){u.revT-=dt;u.thr=-0.75;}
+  u.fireCd=(u.fireCd||0)-dt;
+  if(GS.wanted>=3&&u.fireCd<=0&&dd<40&&Math.abs(err)<0.5&&GS.mode==='play'&&
+     GS.hp>0&&C4C.die<=0){
+    u.fireCd=0.55+Math.random()*0.75;
+    var ba=Math.atan2(P.z-u.z,P.x-u.x);
+    gun().fire(u.x+Math.cos(ba)*(u.lenr*0.7),u.y+0.95,u.z+Math.sin(ba)*(u.lenr*0.7),
+               ba,96,9+WDEF[1].dmg*0.35,1.4,0.05,0,v,'c');
+    burst(u.x+Math.cos(ba)*(u.lenr*0.7),u.y+0.95,u.z+Math.sin(ba)*(u.lenr*0.7),
+          3,4,'spark',0.3,0.4,1.0,[0.7,0.86,1],[0.3,0.45,0.9]);
+    SND.gunshot('uzi');
+  }
+  if(dd<24)panicNear(u.x,u.z,20);
+}
+
+/* ============================================================== aiDrive
+   Called by stepWorld() for every non-player vehicle in 'drive' state. */
+/* Sampled ray in front of the car. Returns 2 for a wall (anything at least
+   1.9 tall, so kerbs and park railings do not stop a driver), 1 for an actor
+   in the lane, 0 for clear. `self` is the mesh doing the looking: its own
+   body has to be skipped or a bus would brake for its front bumper. */
+function aheadBlock(u,look,r,self,noActors){
+  var j,v,qu,dx,dz,x,z,along,side,fx=Math.cos(u.a),fz=Math.sin(u.a);
+  var far=1.4+Math.abs(u.speed)*0.42;
+  if(far>look)far=look;
+  for(var s=1.4;s<=far;s+=1.8){
+    x=u.x+fx*s;z=u.z+fz*s;
+    if(CITY.C.blocked(x,z,1.9,0.15))return 2;
+    if(noActors)continue;
+    for(j=0;j<VEH.length;j++){
+      v=VEH[j];qu=v.userData;
+      if(v===self||!qu.alive||qu.state==='gone'||qu.state==='wreck')continue;
+      dx=qu.x-x;dz=qu.z-z;
+      along=dx*fx+dz*fz;
+      if(along<-qu.lenr*0.5||along>qu.lenr*0.5+0.6)continue;
+      side=Math.abs(dx*fz-dz*fx);
+      if(side<qu.winr+r)return 1;
+    }
+    for(j=0;j<PED.length;j++){
+      qu=PED[j].userData;
+      if(!qu.alive)continue;
+      if(dist2(qu.x,qu.z,x,z)<r+0.35)return 1;
+    }
+  }
+  return 0;
+}
+function reaim(v){
+  var u=v.userData;
+  var nl=nextLeg(u.i,u.j,u.ax,u.dir);
+  u.i=nl.i;u.j=nl.j;u.ax=nl.ax;u.dir=nl.dir;u.off=laneOff();
+  var lt=laneTarget(u.i,u.j,u.ax,u.dir,u.off);
+  u.tx=clamp(lt.x,CFG.R0+2,CFG.WX-2);
+  u.tz=clamp(lt.z,CFG.R0+2,CFG.WZ-2);
+}
+/* A driver owns the junction it is heading for (u.i,u.j) plus the leg it is
+   travelling along; the lane point of that leg at that junction is u.tx,u.tz,
+   so arriving at the waypoint and re-arming are the same event. Signals are
+   not modelled, so the safety net is the forward probe in aheadBlock(). */
+function cruise(v,dt,police){
+  var u=v.userData,d=u.d;
+  if(dist2(u.tx,u.tz,u.x,u.z)<6.5)reaim(v);
+  var sp=Math.abs(u.speed),ta=Math.atan2(u.tz-u.z,u.tx-u.x);
+  var err=angDiff(ta,u.a),look=4.6+sp*0.55;
+  var blk=aheadBlock(u,look,(u.lenr+u.winr)*0.34,v,police?1:0);
+  var steer=clamp(-err*1.9,-1,1);
+  if(blk===1&&sp>2.5&&!police){
+    var rx=Math.sin(u.a),rz=-Math.cos(u.a);
+    var cx=u.tx+rx*3.4,cz=u.tz+rz*3.4;
+    if(!CITY.C.blocked(cx,cz,2.2,0.2)){
+      ta=Math.atan2(cz-u.z,cx-u.x);
+      steer=clamp(-angDiff(ta,u.a)*1.9,-1,1);
+    }
+  }
+  var lim=d.top*(police?0.98:0.7);
+  if(blk===1&&sp<0.5)lim=0;
+  var want=(blk===1&&sp<5.5)?0:(blk===2?-0.45:1);
+  if(Math.abs(err)>1.15)want*=0.35;
+  if(Math.abs(err)>2.0)want=-0.5;
+  u.steer+=(steer-u.steer)*Math.min(1,dt*7);
+  u.thr=approach(u.thr,want,dt*2.4);
+  if(sp>lim)u.thr=Math.min(u.thr,0.12);
+  if(blk===2&&sp>2)u.thr=Math.max(u.thr,-0.8);
+  /* Nobody else in the file counts u.stuck for vehicles, so this is the only
+     place a driver that ground against a kerb decides to reverse and re-pick. */
+  if(Math.abs(u.speed)<0.6&&u.thr>0.4)u.stuck+=dt;
+  else u.stuck=Math.max(0,u.stuck-dt*1.5);
+  if(u.stuck>1.8){u.stuck=0;u.revT=0.9;reaim(v);}
+  if(u.revT>0){u.revT-=dt;u.thr=-0.7;}
+  u.honk=(u.honk||0)-dt;
+  if(blk===1&&!police&&sp>2&&u.honk<=0){
+    u.honk=1.6+Math.random()*2.5;SND.horn();
+  }
+}
+function aiDrive(v,dt){
+  var u=v.userData;
+  if(!u.alive||u.state==='wreck'||u.state==='gone'){u.thr=0;u.steer=0;return;}
+  if(u.role==='police'){aiCop(v,dt);return;}
+  cruise(v,dt,0);
+}
+
+/* ================================================================= aiPed
+   peds choose their own target (pedPickTarget); aiPed only supplies the
+   reason to be somewhere, plus the flee timer, which nobody else decays. */
+function aiPed(q,dt){
+  var u=q.userData,j;
+  if(!u.alive)return;
+  if(u.flee>0){
+    u.flee-=dt;
+    u.st='flee';
+    u.spd=3.4+Math.min(2.2,u.flee*0.25);
+    if(u.flee<=0){u.st='walk';u.spd=1.1+Math.random()*0.55;}
+    return;
+  }
+  u.st='walk';
+  if(u.kind==='cop'){aiCopPed(q,dt);return;}
+  var d=dist2(u.x,u.z,P.x,P.z);
+  if(GS.wanted>=4&&d<40&&Math.random()<dt*0.6)u.flee=3+Math.random()*2;
+  /* a jaywalker does not read brake lights: only a car actually closing on it
+     in its own path gets a reaction, or the pavement never stops twitching. */
+  for(j=0;j<VEH.length;j++){
+    var qu=VEH[j].userData;
+    if(!qu.alive||qu.state!=='drive')continue;
+    var sp=Math.abs(qu.speed);
+    if(sp<2.5)continue;
+    var fx=Math.cos(qu.a),fz=Math.sin(qu.a),dx=u.x-qu.x,dz=u.z-qu.z;
+    var along=dx*fx+dz*fz;
+    if(along<0.2||along>sp*1.6+3)continue;
+    if(Math.abs(dx*fz-dz*fx)>1.6)continue;
+    u.flee=2.2+Math.random()*1.6;
+    break;
+  }
+}
+function aiCopPed(q,dt){
+  var u=q.userData,d=dist2(u.x,u.z,P.x,P.z),j;
+  if(GS.wanted<=0||GS.mode!=='play'){
+    if(u.kind==='cop')u.kind='civ';
+    return;
+  }
+  u.spd=d>18?4.2:2.9;
+  if(d<1.4){
+    if(GS.wanted>=3&&P.mode==='foot'&&GS.hp>0&&C4C.die<=0){
+      u.fireCd=(u.fireCd||0)-dt;
+      if(u.fireCd<=0){
+        u.fireCd=1.1+Math.random();
+        var a=Math.atan2(P.z-u.z,P.x-u.x);
+        gun().fire(u.x+Math.cos(a)*0.5,u.y+1.15,u.z+Math.sin(a)*0.5,
+                   a,88,7,1.2,0.06,0,q,'c');
+        SND.gunshot('uzi');
+      }
+    }
+    standStill(u,dt);
+    return;
+  }
+  /* aim 2.2u PAST the player: stepPed() re-picks any target inside 1.2u, so a
+     cop aimed at the player's own point would be re-issued every frame and
+     never actually close the last metre. */
+  var a2=Math.atan2(P.z-u.z,P.x-u.x);
+  u.tx=P.x+Math.cos(a2)*2.2;
+  u.tz=P.z+Math.sin(a2)*2.2;
+}
+function standStill(u,dt){
+  var a=Math.atan2(P.z-u.z,P.x-u.x);
+  u.a=angLerp(u.a,a,Math.min(1,dt*4));
+  u.tx=u.x;u.tz=u.z;
+}
+/* ============================================================== pickups
+   Four kinds, one InstancedMesh each, all built lazily so the load-time
+   material table stays free of GL objects. Dead slots park at y=-60 with a
+   near-zero scale because r128 InstancedMesh has no per-instance visible. */
+var PKCAP={cash:96,health:8,armor:6,ammo:12};
+var PKMAT={cash:'cash',health:'heal',armor:'armor',ammo:'ammo'};
+var CRATE=[0,40,120,18,4];
+function PickupPool(){
+  var kinds=['cash','health','armor','ammo'],im={},free={},list=[],k,i;
+  var mm=new THREE.Matrix4(),q=new THREE.Quaternion(),
+      sv=new THREE.Vector3(1,1,1),pv=new THREE.Vector3(),
+      up=new THREE.Vector3(0,1,0);
+  function park(kk,row){
+    mm.compose(pv.set(0,-60,0),q.setFromAxisAngle(up,0),
+               sv.set(0.0001,0.0001,0.0001));
+    im[kk].setMatrixAt(row,mm);
+  }
+  for(k=0;k<kinds.length;k++){
+    var kk=kinds[k];
+    var g=(kk==='cash')?new THREE.CylinderGeometry(0.22,0.22,0.05,10):
+                          new THREE.BoxGeometry(0.46,0.46,0.46);
+    if(kk==='cash')g.rotateZ(Math.PI/2);
+    im[kk]=new THREE.InstancedMesh(g,MAT[PKMAT[kk]],PKCAP[kk]);
+    im[kk].frustumCulled=false;
+    im[kk].name='pickup_'+kk;
+    im[kk].visible=false;
+    scene.add(im[kk]);
+    free[kk]=[];
+    for(i=0;i<PKCAP[kk];i++){park(kk,i);free[kk].push(i);}
+    im[kk].instanceMatrix.needsUpdate=true;
+  }
+  function put(kk,row,it){
+    q.setFromAxisAngle(up,it.ang);
+    pv.set(it.x,it.y+Math.sin(it.bob)*0.10,it.z);
+    sv.set(1,1,1);
+    mm.compose(pv,q,sv);
+    im[kk].setMatrixAt(row,mm);
+  }
+  function drop(it){
+    if(it.row<0)return;
+    park(it.kind,it.row);
+    im[it.kind].instanceMatrix.needsUpdate=true;
+    free[it.kind].push(it.row);
+    it.row=-1;it.on=0;
+  }
+  return {
+    list:list,
+    count:function(){var c=0,i;for(i=0;i<list.length;i++)if(list[i].on)c++;return c;},
+    spawn:function(kk,x,z,val,w,note){
+      if(!im[kk]||!isFinite(x)||!isFinite(z))return 0;
+      if(!free[kk].length)return 0;
+      var it=null,j;
+      for(j=0;j<list.length;j++)
+        if(!list[j].on&&list[j].kind===kk){it=list[j];break;}
+      if(!it){
+        if(list.length>=220)return 0;
+        it={on:0,kind:kk,x:0,y:0,z:0,val:0,w:0,note:0,ang:0,bob:0,row:-1};
+        list.push(it);
+      }
+      it.kind=kk;it.on=1;it.x=x;it.z=z;
+      it.y=CITY.C.groundH(x,z)+0.34;
+      it.val=val|0;it.w=w|0;it.note=note|0;
+      it.ang=Math.random()*TAU;it.bob=Math.random()*TAU;
+      it.row=free[kk].pop();
+      put(kk,it.row,it);
+      im[kk].instanceMatrix.needsUpdate=true;
+      im[kk].visible=true;
+      return 1;
+    },
+    step:function(dt){
+      var j,dirty={},px=P.x,pz=P.z,rr=1.35;
+      if(P.mode==='veh'&&P.veh){px=P.veh.userData.x;pz=P.veh.userData.z;rr=2.3;}
+      for(j=0;j<list.length;j++){
+        var it=list[j];
+        if(!it.on)continue;
+        it.ang+=dt*(it.kind==='cash'?2.4:1.4);
+        it.bob+=dt*3.0;
+        put(it.kind,it.row,it);
+        dirty[it.kind]=1;
+        if(GS.mode==='play'&&C4C.die<=0&&dist2(it.x,it.z,px,pz)<rr)
+          if(takePickup(it))drop(it);
+      }
+      for(var kk in dirty)im[kk].instanceMatrix.needsUpdate=true;
+    },
+    clear:function(){
+      for(var j=0;j<list.length;j++)if(list[j].on)drop(list[j]);
+      for(var kk in im){im[kk].visible=false;}
+    }
+  };
+}
+function pkp(){if(!pickups)pickups=PickupPool();return pickups;}
+function spawnPickup(k,x,z,v,w,note){return pkp().spawn(k,x,z,v||0,w||0,note||0);}
+function pickupsClear(){if(pickups)pickups.clear();}
+/* hook 4 of 5 */
+function pickupsStep(dt){if(pickups)pickups.step(dt);}
+function takePickup(it){
+  if(it.kind==='cash'){
+    if(GS.mission&&GS.mission.kind==='cash'&&it.note){
+      GS.mission.got++;
+      SND.pickup();
+      say('ENVELOPE '+GS.mission.got+'/'+GS.mission.need,2.2);
+      return 1;
+    }
+    if(it.val<=0)return 0;
+    GS.cash+=it.val;GS.score+=it.val;
+    say('+$'+it.val,1.4);SND.cash();
+    return 1;
+  }
+  if(it.kind==='health'){
+    if(GS.hp>=100)return 0;
+    GS.hp=Math.min(100,GS.hp+it.val);
+    say('HEALTH',1.4);SND.pickup();
+    return 1;
+  }
+  if(it.kind==='armor'){
+    if(GS.ar>=100)return 0;
+    GS.ar=Math.min(100,GS.ar+it.val);
+    say('ARMOUR',1.4);SND.pickup();
+    return 1;
+  }
+  if(it.kind==='ammo'){
+    giveAmmo(it.w,CRATE[it.w]|0);
+    say(WNAME[it.w]+' +'+(CRATE[it.w]|0),1.6);SND.pickup();
+    return 1;
+  }
+  return 0;
+}
+var PICKSLOT={cash:['pier','lot','park','club'],health:['plaza','apt','park'],
+              armor:['station','bank','garage'],ammo:['yard','lot','rail','club']};
+var PICKLIM={cash:8,health:5,armor:3,ammo:6};
+var PICKVAL={cash:0,health:35,armor:45,ammo:0};
+function spawnCityPickups(){
+  var kinds=['cash','health','armor','ammo'],k,i;
+  for(k=0;k<kinds.length;k++){
+    var kk=kinds[k],slot=PICKSLOT[kk],n=0;
+    for(i=0;i<CITY.plots.length&&n<PICKLIM[kk];i++){
+      var p=CITY.plots[i];
+      if(slot.indexOf(p.t)<0)continue;
+      var sp=roadSnap(p.x,p.z);
+      if(dist2(sp.x,sp.z,p.x,p.z)>12)continue;
+      if(CITY.C.blocked(sp.x,sp.z,1.2,0.3))continue;
+      var w=0,val=PICKVAL[kk];
+      if(kk==='cash')val=30+((i*37)%90);
+      if(kk==='ammo'){w=1+((n*2+GS.city)%4);val=CRATE[w];}
+      if(!spawnPickup(kk,sp.x,sp.z,val,w))continue;
+      n++;
+    }
+  }
+}
+
+/* ================================================================ markers
+   Four vertical beams. Tag meanings: obj = go here now, dest = end of the
+   run, bad = things go here, job = payphone. Lazily built like the pools. */
+var MKTAG=['obj','dest','bad','job'];
+function MarkerField(){
+  var s={},i;
+  for(i=0;i<MKTAG.length;i++){
+    var grp=new THREE.Group();
+    var beam=new THREE.Mesh(new THREE.CylinderGeometry(0.95,0.95,4.6,14,1,true),
+                            MAT.mk[i]);
+    beam.position.y=2.3;
+    var rg=new THREE.RingGeometry(0.74,1.04,22);
+    rg.rotateX(-Math.PI/2);
+    var ring=new THREE.Mesh(rg,MAT.mk[i]);
+    ring.position.y=0.06;
+    grp.add(beam);grp.add(ring);
+    grp.visible=false;
+    grp.name='marker_'+MKTAG[i];
+    scene.add(grp);
+    s[MKTAG[i]]={grp:grp,ring:ring,on:0,x:0,z:0};
+  }
+  return {
+    set:function(tag,x,z){
+      var m=s[tag];
+      if(!m||!isFinite(x)||!isFinite(z))return;
+      if(!m.on){m.on=1;m.grp.visible=true;}
+      m.x=x;m.z=z;
+      m.grp.position.set(x,CITY.C.groundH(x,z),z);
+    },
+    hide:function(tag){
+      var m=s[tag];
+      if(!m||!m.on)return;
+      m.on=0;m.grp.visible=false;
+    },
+    hideAll:function(){for(var i=0;i<MKTAG.length;i++)this.hide(MKTAG[i]);},
+    step:function(dt){
+      var p=0.5+0.5*Math.sin(C4C.t*3.4);
+      for(var i=0;i<MKTAG.length;i++){
+        var m=s[MKTAG[i]];
+        if(!m.on)continue;
+        m.grp.scale.set(1+0.06*p,1,1+0.06*p);
+        m.ring.rotation.y+=dt*0.8;
+      }
+    }
+  };
+}
+function mkp(){if(!markers)markers=MarkerField();return markers;}
+function markersClear(){if(markers)markers.hideAll();}
+/* hook 5 of 5 */
+function markersStep(dt){if(markers)markers.step(dt);}
+
+/* ========================================================= death and bust
+   Nothing else in the file owns GS.mode once the player stops being able to
+   move, so 4c drives the dead state and the respawn; chunk 5 only draws it. */
+function plotNear(kinds,x,z){
+  var best=null,bd=1e9,i;
+  for(i=0;i<CITY.plots.length;i++){
+    var p=CITY.plots[i];
+    if(kinds.indexOf(p.t)<0)continue;
+    var d=dist2(p.x,p.z,x,z);
+    if(d<bd){bd=d;best=p;}
+  }
+  return best;
+}
+function killPlayer(){
+  if(GS.mode!=='play'||C4C.die>0)return;
+  GS.mode='dead';GS.hp=0;GS.deadT=0;
+  C4C.die=2.4;C4C.bust=0;
+  if(P.mode==='veh'&&P.veh){
+    var u=P.veh.userData;u.thr=0;u.hb=1;
+  }
+  bloodSplat(P.x,P.z,0.9);
+  puff(P.x,P.y+0.9,P.z,7,2.2,0.55,0.14,0.6,[0.72,0.07,0.05],
+       [0.35,0.02,0.02],'bloodP',9,0.7);
+  if(P.g)P.g.rotation.x=1.45;
+  SND.hurt();
+  GS.lives=GS.lives>0?GS.lives-1:0;
+  bigMsg('WASTED',GS.lives>0?'You are dead':'No lives left');
+  if(GS.mission)failMission('YOU DIED');
+}
+function busted(){
+  if(GS.mode!=='play')return;
+  C4C.bust=0;
+  GS.mode='dead';GS.deadT=0;C4C.die=2.2;
+  GS.cash=Math.floor(GS.cash*0.9);
+  bigMsg('BUSTED','The cops took most of your money');
+  SND.fail();
+  if(GS.mission)failMission('BUSTED');
+}
+function respawnPlayer(){
+  var pl=plotNear(['station','garage','plaza'],P.x,P.z);
+  var sp=pl?roadSnap(pl.x,pl.z):roadSnap(P.x,P.z);
+  spawnPlayer(sp.x,sp.z,headingOf(sp));
+  GS.mode='play';GS.hp=100;GS.ar=0;
+  GS.wanted=0;GS.heat=0;GS.coolT=0;GS.starT=0;
+  GS.ammo[0]=0;GS.ammo[1]=24;GS.ammo[2]=0;GS.ammo[3]=0;GS.ammo[4]=0;
+  GS.wp=0;GS.deadT=0;
+  C4C.die=0;C4C.bust=0;C4C.job=1.2;
+  markersClear();
+  if(bullets)bullets.clear();
+  if(P.g)P.g.rotation.x=0;
+  say('STEADY ON',1.6);
+}
+function bustCheck(dt){
+  if(GS.wanted<=0||GS.wanted>2||P.mode!=='foot'||C4C.die>0){C4C.bust=0;return;}
+  var sp=Math.sqrt(P.vx*P.vx+P.vz*P.vz),j,near=0;
+  for(j=0;j<VEH.length;j++){
+    var u=VEH[j].userData;
+    if(u.role!=='police'||!u.alive||u.state!=='drive')continue;
+    if(dist2(u.x,u.z,P.x,P.z)<4.6&&Math.abs(u.speed)<4.5){near=1;break;}
+  }
+  if(!near){
+    for(j=0;j<PED.length;j++){
+      var q=PED[j].userData;
+      if(!q.alive||q.kind!=='cop')continue;
+      if(dist2(q.x,q.z,P.x,P.z)<2.4){near=1;break;}
+    }
+  }
+  if(!near||sp>3.4){C4C.bust=Math.max(0,C4C.bust-dt*2);return;}
+  C4C.bust+=dt;
+  if(C4C.bust>1.5)busted();
+}
+
+/* ============================================================== missions
+   Six per city, re-offerable. A payphone opens the brief, the brief runs on
+   its own clock (GS.briefT, which nothing else touches), and the mission then
+   runs on GS.mission.t. Killing GS.kills/GS.wrecks counters is how the kill
+   and wreck jobs are scored, so no actor code needs to know about missions. */
+var MDC=-1,MD=null;
+var MTYPES0=['deliv','cash','kill','cash','kill','deliv'];
+var MTYPES1=['deliv','cash','wreck','cash','kill','deliv'];
+var MNAM={deliv:'COURIER',cash:'CASH GRAB',kill:'HIT LIST',wreck:'DEMOLITION'};
+var MBRI={
+  deliv:'Take the package to the drop point. Do not be late.',
+  cash:'Collect every envelope along the route, then bring them back here.',
+  kill:'Take out the marked civilians. Nobody will mourn them.',
+  wreck:'Wreck the required number of vehicles. Explosions optional.'};
+var MNEED={deliv:[1,1,1],cash:[5,7,9],kill:[4,6,8],wreck:[3,4,6]};
+var MLIM={deliv:[85,80,75],cash:[100,95,90],kill:[75,85,95],wreck:[65,70,75]};
+var MRW={deliv:[600,900,1400],cash:[700,1000,1500],kill:[800,1200,1800],
+         wreck:[500,750,1100]};
+function missionDefs(c){
+  if(MD&&MDC===c)return MD;
+  var ty=c>0?MTYPES1:MTYPES0,out=[],i;
+  for(i=0;i<6;i++){
+    var t=ty[i],lv=c;
+    out.push({kind:t,name:MNAM[t]+' '+(i+1),brief:MBRI[t],need:MNEED[t][lv],
+              lim:MLIM[t][lv],reward:MRW[t][lv]});
+  }
+  MD=out;MDC=c;
+  return MD;
+}
+var PHONEPLOT={deliv:['garage','lot','yard'],cash:['shop','club','plaza'],
+               kill:['yard','rail','station'],wreck:['yard','lot','garage']};
+var DESTPLOT={deliv:['bank','plaza','pier','club','rail'],
+              cash:['plaza','shop','club','pier'],
+              kill:['club','yard','rail','park'],wreck:['yard','lot','garage','rail']};
+var PHONES=[];
+function pickPlot(kinds,used){
+  var k,i;
+  for(k=0;k<kinds.length;k++){
+    for(i=0;i<CITY.plots.length;i++){
+      if(used[i])continue;
+      var p=CITY.plots[i];
+      if(p.t!==kinds[k])continue;
+      used[i]=1;
+      return p;
+    }
+  }
+  for(i=0;i<CITY.plots.length;i++){
+    if(used[i])continue;
+    used[i]=1;
+    return CITY.plots[i];
+  }
+  return null;
+}
+function plotFarFrom(x,z,kind){
+  var kinds=DESTPLOT[kind]||['plaza'],best=null,bd=-1,k,i;
+  for(k=0;k<kinds.length;k++){
+    for(i=0;i<CITY.plots.length;i++){
+      var p=CITY.plots[i];
+      if(p.t!==kinds[k])continue;
+      var d=dist2(p.x,p.z,x,z);
+      if(d>45&&d>bd){bd=d;best=p;}
+    }
+  }
+  if(best)return best;
+  for(i=0;i<CITY.plots.length;i++){
+    var q=CITY.plots[i],e=dist2(q.x,q.z,x,z);
+    if(e>bd){bd=e;best=q;}
+  }
+  return best;
+}
+function resetCityJobs(){
+  PHONES.length=0;
+  var defs=missionDefs(GS.city),used={},i;
+  /* roadSnap() snaps to the nearest street CENTRE LINE, and a lot centre is
+     STRIDE/2 from one (CFG.CT), so the phone always lands 19-30 m from its
+     plot. A road-width threshold here rejected every candidate and left
+     PHONES empty, which made every mission unreachable. */
+  var maxd=CFG.STRIDE*0.5+CFG.LANE;
+  for(i=0;i<defs.length;i++){
+    var p=pickPlot(PHONEPLOT[defs[i].kind],used);
+    if(!p)break;
+    var sp=roadSnap(p.x,p.z);
+    if(dist2(sp.x,sp.z,p.x,p.z)>maxd)continue;
+    PHONES.push({x:sp.x,z:sp.z,mi:i,on:1,dwell:0});
+  }
+}
+function phoneOf(mi){
+  for(var i=0;i<PHONES.length;i++)if(PHONES[i].mi===mi)return PHONES[i];
+  return null;
+}
+function openBrief(ph){
+  var def=missionDefs(GS.city)[ph.mi];
+  if(!def)return;
+  ph.on=0;ph.dwell=0;
+  GS.missionIdx=ph.mi;
+  GS.brief=def.brief;GS.briefT=7;
+  C4C.job=7.6;
+  say('MISSION BRIEFING',2.4);SND.menu();
+  mkp().hide('job');
+}
+function beginMission(mi){
+  var def=missionDefs(GS.city)[mi];
+  if(!def){GS.brief=null;GS.briefT=0;return;}
+  var ph=phoneOf(mi);
+  var far=ph?plotFarFrom(ph.x,ph.z,def.kind):null;
+  var sp=far?roadSnap(far.x,far.z):roadPointNear(P.x,P.z,60,95);
+  var m={id:mi,kind:def.kind,name:def.name,lim:def.lim,reward:def.reward,
+         t:0,need:def.need,got:0,shown:-1,stage:0,r:4.8,repin:0,
+         k0:GS.kills,w0:GS.wrecks,
+         ox:ph?ph.x:P.x,oz:ph?ph.z:P.z,tx:sp.x,tz:sp.z,
+         case:def.kind==='deliv'?1:0};
+  if(m.kind==='cash'){
+    for(var n=0;n<m.need;n++){
+      var f=(n+1)/(m.need+1);
+      var s=roadSnap(m.ox+(m.tx-m.ox)*f,m.oz+(m.tz-m.oz)*f);
+      spawnPickup('cash',s.x,s.z,0,0,1);
+    }
+  }
+  GS.mission=m;
+  GS.missionIdx=mi;
+  GS.briefT=0;
+  C4C.job=0;
+  bigMsg('MISSION STARTED',m.name);
+  say(m.brief,3.6);
+  SND.menu();
+}
+function clearEnvelopeFlags(){
+  if(!pickups)return;
+  var L=pickups.list;/* PickupPool exposes `list` as the live array, not an accessor */
+  for(var i=0;i<L.length;i++)if(L[i].on&&L[i].note)L[i].note=0;
+}
+function winMission(){
+  var m=GS.mission;
+  if(!m)return;
+  if(GS.done.indexOf(m.id)<0)GS.done.push(m.id);
+  GS.cash+=m.reward;GS.score+=m.reward*2;GS.cityScore+=m.reward;
+  GS.mission=null;GS.brief=null;GS.briefT=0;
+  clearEnvelopeFlags();
+  mkp().hide('obj');mkp().hide('dest');mkp().hide('bad');
+  bigMsg('MISSION PASSED','$'+m.reward);
+  SND.complete();
+  C4C.job=2.4;
+}
+function failMission(why){
+  if(!GS.mission)return;
+  GS.mission=null;GS.brief=null;GS.briefT=0;
+  clearEnvelopeFlags();
+  mkp().hide('obj');mkp().hide('dest');mkp().hide('bad');
+  C4C.fail=3;C4C.job=1.2;
+  bigMsg('MISSION FAILED',why);
+  SND.fail();
+}
+function nearestEnvelope(){
+  if(!pickups)return null;
+  var L=pickups.list,best=null,bd=1e9,i;
+  for(i=0;i<L.length;i++){
+    var it=L[i];
+    if(!it.on||!it.note||it.kind!=='cash')continue;
+    var d=dist2(it.x,it.z,P.x,P.z);
+    if(d<bd){bd=d;best=it;}
+  }
+  return best;
+}
+function nearestTarget(kinds){
+  var j,best=null,bd=1e9;
+  if(kinds==='ped'){
+    for(j=0;j<PED.length;j++){
+      var u=PED[j].userData;
+      if(!u.alive||u.kind==='cop')continue;
+      var d=dist2(u.x,u.z,P.x,P.z);
+      if(d<70&&d<bd){bd=d;best=u;}
+    }
+  }else{
+    for(j=0;j<VEH.length;j++){
+      var v=VEH[j],q=v.userData;
+      if(!q.alive||q.role==='police'||q.state==='wreck'||q.state==='gone')continue;
+      if(v===P.veh)continue;
+      var e=dist2(q.x,q.z,P.x,P.z);
+      if(e<80&&e<bd){bd=e;best=q;}
+    }
+  }
+  return best;
+}
+function runMission(dt){
+  var m=GS.mission;
+  m.t+=dt;m.repin-=dt;
+  if(m.t>=m.lim){failMission('OUT OF TIME');return;}
+  if(m.kind==='kill'||m.kind==='wreck'){
+    m.got=Math.max(0,(m.kind==='kill'?GS.kills-m.k0:GS.wrecks-m.w0));
+    if(m.repin<=0){
+      m.repin=0.6;
+      var t=nearestTarget(m.kind==='kill'?'ped':'veh');
+      if(t)mkp().set('bad',t.x,t.z);
+      else mkp().hide('bad');
+    }
+    if(m.got!==m.shown){
+      m.shown=m.got;
+      say(m.name+' '+m.got+'/'+m.need,2.2);
+    }
+    if(m.got>=m.need)winMission();
+    return;
+  }
+  if(m.kind==='deliv'){
+    /* the countdown itself is the main loop's business (chunk 5 HUD) */
+    mkp().set('obj',m.tx,m.tz);
+    if(dist2(P.x,P.z,m.tx,m.tz)<m.r)winMission();
+    return;
+  }
+  /* cash run: envelopes first, then back to the phone */
+  if(m.stage===0){
+    var e=nearestEnvelope();
+    if(e)mkp().set('obj',e.x,e.z);
+    else mkp().set('obj',m.tx,m.tz);
+    mkp().set('dest',m.ox,m.oz);
+    if(m.got>=m.need){
+      m.stage=1;
+      say('NOW BRING THEM BACK',2.6);
+      SND.pickup();
+    }
+    return;
+  }
+  mkp().hide('dest');
+  mkp().set('obj',m.ox,m.oz);
+  if(dist2(P.x,P.z,m.ox,m.oz)<m.r)winMission();
+}
+/* hook 3 of 5: brief clock, payphones, mission clock, respawn. */
+function missionStep(dt){
+  if(GS.mode==='dead'){
+    if(C4C.die<=0)respawnPlayer();
+    return;
+  }
+  if(GS.mode!=='play')return;
+  if(GS.brief&&!GS.mission){
+    GS.briefT-=dt;
+    if(GS.briefT<=0)beginMission(GS.missionIdx|0);
+    return;
+  }
+  if(!GS.mission&&!GS.brief&&C4C.job<=0){
+    var i,best=null,bd=1e9;
+    for(i=0;i<PHONES.length;i++){
+      var ph=PHONES[i];
+      if(!ph.on)continue;
+      var d=dist2(ph.x,ph.z,P.x,P.z);
+      if(d<bd){bd=d;best=ph;}
+    }
+    if(best&&bd<3.6)mkp().set('job',best.x,best.z);
+    else if(markers)markers.hide('job');
+    if(best&&bd<2.0){
+      if(C4C.ph<=0){C4C.ph=1.1;SND.tick();}
+      if(jp('start')||jp('act')){openBrief(best);return;}
+      if(P.mode==='foot'){
+        best.dwell+=dt;
+        if(best.dwell>0.32)openBrief(best);
+      }else best.dwell=0;
+    }
+    for(i=0;i<PHONES.length;i++)if(PHONES[i]!==best)PHONES[i].dwell=0;
+    return;
+  }
+  if(markers)markers.hide('job');
+  if(GS.mission)runMission(dt);
+}
+
+
 
 
 

@@ -10,17 +10,6 @@ if(s.split(TAIL).length-1!==1)throw new Error('tail anchor not unique');
 const driver=String.raw`
 /* ------------------------------------------------------- smoke driver */
 var UI={w:1280,h:720};/* game-scope: onResize() writes UI.w/UI.h */
-/* --- TEMPORARY chunk-4c shims, delete this block when 4c lands -----------------
-   These names are read by ALREADY-WRITTEN 4b code. A missing one does not just
-   no-op, it aborts its caller: clearActors() throws on "bullets" (killing
-   populateCity), and killPed() throws in dropMoney() *before* its caller can run
-   GS.runOver++/crime(). Declaring them here keeps 4b measurable. A var at this
-   level lands in the game IIFE scope, not the driver's inner IIFE. DELETE after 4c. */
-var bullets=null,markers=null,pickups=null;
-var PRESTUB=['syncCase','aiDrive','aiPed','policeAlarm','tryFire','dropMoney'];
-(function(){for(var i=0;i<PRESTUB.length;i++)
-  if(!window[PRESTUB[i]])window[PRESTUB[i]]=function(){return 0;};})();
-/* ------------------------------------------------------------------ end shim */
 (function(){
 var H={log:[],missing:{},frames:0,errs:0,stepErrs:0,rendErrs:0,stop:false};
 window.__H=H;
@@ -378,6 +367,98 @@ try{
     }
     return null;
   }
+  /* Chunk 4c put real steering on the traffic (aiDrive used to be a stubbed
+     no-op, so every AI car sat still forever), which broke the old free-road
+     assumption: the staged car now has something living in its lane. These two
+     probes make the failure legible instead of showing a mystery speed of 0.07. */
+  /* hh/hm default to vehicle-probe size; the gun test passes (0.15,0.15) because
+     blocked() is height-gated and a bolt flies under a 1.9 m probe. */
+  function wallAhead(x,z,a,d,hh,hm){
+    var H=(hh===undefined)?1.9:hh,M=(hm===undefined)?0.2:hm;
+    for(var s=1.5;s<=d;s+=1.5)
+      if(CITY.C.blocked(x+Math.cos(a)*s,z+Math.sin(a)*s,H,M))return r1(s);
+    return 0;
+  }
+  function vehAhead(x,z,a,d){
+    var out=[],i,f=Math.cos(a),g=Math.sin(a),u,dx,dz,al,side;
+    for(i=0;i<VEH.length;i++){
+      u=VEH[i].userData;
+      if(VEH[i]===P.veh||!u.alive||u.state==='gone'||u.state==='wreck')continue;
+      dx=u.x-x;dz=u.z-z;al=dx*f+dz*g;side=Math.abs(dx*g-dz*f);
+      if(al>0&&al<d&&side<2.4)out.push(VK[u.kind].n+'/'+u.state+'@'+r1(al));
+    }
+    return out;
+  }
+  /* Empty the lane the staged car is about to drive down. roadSnap picks its
+     lane direction at random, so screening before enterCar is useless -- the
+     heading changes under the test. This is the same "relocate the world to
+     unit-test one function" trick runOver already uses with a ped. */
+  function clearLane(x,z,a,d){
+    var n=0,i,j,f=Math.cos(a),g=Math.sin(a),u,dx,dz,al,side,sgn;
+    for(i=0;i<VEH.length;i++){
+      u=VEH[i].userData;
+      if(VEH[i]===P.veh||!u.alive||u.state==='gone')continue;
+      dx=u.x-x;dz=u.z-z;al=dx*f+dz*g;side=dx*g-dz*f;
+      if(al>-4&&al<d&&Math.abs(side)<4.5){
+        sgn=side<0?-1:1;u.x+=g*11*sgn;u.z-=f*11*sgn;
+        u.vx=u.vz=0;u.speed=0;u.thr=0;u.steer=0;u.hb=1;u.state='parked';n++;
+      }
+    }
+    for(j=0;j<PED.length;j++){
+      u=PED[j].userData;
+      if(!u.alive)continue;
+      dx=u.x-x;dz=u.z-z;al=dx*f+dz*g;side=dx*g-dz*f;
+      if(al>-4&&al<d&&Math.abs(side)<4.5){
+        sgn=side<0?-1:1;u.x+=g*9*sgn;u.z-=f*9*sgn;u.tx=u.x;u.tz=u.z;n++;
+      }
+    }
+    return n;
+  }
+  /* Both free-road scenarios (driveFree, topSpeed) need ~60 m of empty corridor.
+     roadSnap() cannot be used to stage them: it picks dir and the lane offset
+     with Math.random(), so the same call twice can face the car into a wall
+     (that is exactly what the 10 m corridor / 0.37 top-speed-ratio runs were).
+     Assuming the map centre is a street was wrong too -- one run staged a car
+     with geometry 1.5 m in front of it. So probe the street lattice (street
+     centre lines are x = i*CFG.STRIDE and z = j*CFG.STRIDE) and stage only where
+     a corridor is verified open in both directions. Deterministic by design:
+     no RNG, so a bad number here is a physics regression, not a bad draw.
+     NOTE wallAhead() returns 0 for "nothing blocked within d" -- that must be
+     compared as the full distance, or the test steers the car INTO the wall. */
+  function findCorridor(){
+    var g=60,best=null,bs=-1,i,j,x,z,wf,wb,sc;
+    for(j=0;j<=CFG.NZ;j++){
+      for(i=0;i<CFG.NX;i++){
+        x=Math.round((i+0.5)*CFG.STRIDE);z=Math.round(j*CFG.STRIDE);
+        wf=wallAhead(x,z,0,g);wb=wallAhead(x,z,Math.PI,g);
+        sc=Math.min(wf||g,wb||g);
+        if(sc>bs){bs=sc;best={x:x,z:z,a:wf>=g?0:(wb>=g?Math.PI:(wf>=wb?0:Math.PI))};}
+      }
+    }
+    for(i=0;i<=CFG.NX;i++){
+      for(j=0;j<CFG.NZ;j++){
+        x=Math.round(i*CFG.STRIDE);z=Math.round((j+0.5)*CFG.STRIDE);
+        wf=wallAhead(x,z,Math.PI/2,g);wb=wallAhead(x,z,-Math.PI/2,g);
+        sc=Math.min(wf||g,wb||g);
+        if(sc>bs){bs=sc;best={x:x,z:z,a:wf>=g?Math.PI/2:(wb>=g?-Math.PI/2:(wf>=wb?Math.PI/2:-Math.PI/2))};}
+      }
+    }
+    if(best)best.wall=bs;
+    return best;
+  }
+  function stageCar(car){
+    var u=car.userData,g=60,c=findCorridor();
+    u.x=c.x;u.z=c.z;u.a=c.a;u.y=0;u.vx=u.vz=0;u.speed=0;u.thr=0;u.steer=0;u.hb=0;
+    u.state='parked';
+    var pre=wallAhead(u.x,u.z,u.a,g);
+    var n=clearLane(u.x,u.z,u.a,70);
+    var wf=wallAhead(u.x,u.z,u.a,g);
+    /* pre vs wall isolates whether clearLane() itself is what closes the
+       corridor (blocked() counts parked cars/boxes, not only buildings), and
+       the heading in at shows which scan leg and direction was chosen. */
+    return {wall:wf||g,pre:pre||g,avail:c.wall,pushed:n,
+      at:r1(u.x)+','+r1(u.z)+'/'+r1(u.a)};
+  }
   var t0=Date.now();
   try{initGL();}catch(e){slog('FATAL initGL '+(e.message||e));}
   R.gl={three:THREE.REVISION,gl:!!(renderer&&renderer.getContext()),cam:!!camera};
@@ -436,11 +517,19 @@ try{
     var ferr=enterCar(fr);
     if(ferr)R.driveFree=ferr;
     else{
-      var samp=[],sx=cx(),sz=cz();
+      var samp=[],sx,sz;
       R.driveFreeBoard=boardNote(fr);
+      /* Corridor staging (see stageCar): without it the curve measures the
+         collision resolver, not integrateVeh. */
+      var fu0=P.veh.userData;
+      var stg=stageCar(P.veh);
+      sx=cx();sz=cz();
       for(var sm=0;sm<7;sm++){step(30,{up:1});
         samp.push('t='+((sm+1)*0.5)+'s sp='+(P.veh?r1(P.veh.userData.speed):'-')+' d='+r1(Math.sqrt((cx()-sx)*(cx()-sx)+(cz()-sz)*(cz()-sz))));}
-      R.driveFree={kind:VK[P.veh.userData.kind].n,top:VK[P.veh.userData.kind].top,samp:samp};
+      R.driveFree={kind:VK[P.veh.userData.kind].n,top:VK[P.veh.userData.kind].top,samp:samp,
+        pushed:stg.pushed,wall:stg.wall,pre:stg.pre,avail:stg.avail,at:stg.at,
+        wallEnd:wallAhead(cx(),cz(),P.veh?P.veh.userData.a:0,40)||40,
+        cars:vehAhead(sx,sz,fu0.a,40)};
       var dA=P.veh.userData.a,dX=cx(),dZ=cz();
       step(120,{up:1,left:1});render();
       R.driveFreeTurn={da:r1(P.veh.userData.a-dA),dx:r1(cx()-dX),dz:r1(cz()-dZ),sp:r1(P.veh.userData.speed),fx:fxRep()};
@@ -480,11 +569,8 @@ try{
     JP.act=1;step(30,null);
   }
   R.exit={mode:P.mode,veh:VEH.length,bad:actorScan()};
-  GS.wp=2;GS.wanted=0;
-  var k0=GS.kills,am0=GS.ammo[GS.wp];
-  step(60,{fire:1});render();
-  R.shoot={wp:GS.wp,ammo0:am0,ammo1:GS.ammo[GS.wp],kills:GS.kills-k0,wanted:GS.wanted,
-    ped0:R.pop.ped,ped1:PED.length};
+  /* Weapons are exercised in the chunk-4c block near the end (it needs a live
+     bullet pool, which only exists once something has actually been fired). */
   /* runOver: same lesson as the crash test — board a sturdy isolated car, then
      find the live ped nearest to *that* car, not to some earlier parking spot. */
   if(P.mode==='veh'){JP.act=1;step(30,null);}
@@ -518,20 +604,33 @@ try{
     JP.act=1;step(30,null);
   }
   /* Top speed has to respect d.top per kind. One-size-fits-all drag used to pin
-     the whole fleet near 6 m/s, which also left police unable to chase anyone.
-     VSPORT=5 VCOP=2 VTAXI=1: fast, middle, slow, so scaling is visible. */
+     the whole fleet near 6 m/s, which also left police unable to chase anyone. */
   (function(){
     function carOf(k){for(var i=0;i<VEH.length;i++){var u=VEH[i].userData;
-      if(u.state!=='gone'&&ok(u.x)&&ok(u.z)&&u.kind===k)return VEH[i];}return null;}
-    var want=[5,2,1],out=[],ki;
-    for(ki=0;ki<want.length;ki++){
-      var car=carOf(want[ki]);
-      if(!car){out.push(VK[want[ki]].n+':absent');continue;}
-      var cu=car.userData,cS=roadSnap(cu.x,cu.z);
+      if(u.state==='gone'||u.state==='wreck'||u.kind!==k)continue;
+      if(ok(u.x)&&ok(u.z))return VEH[i];}return null;}
+    /* Which kinds the city actually put on the road varies with the crowd RNG
+       (SPORT is rare, and the crash/runOver tests consume cars), so a fixed
+       [VSPORT,VCOP,VTAXI] list came back "SPORT:absent". Test the three fastest
+       kinds present instead -- the assertion is "peak respects d.top", and it
+       still covers the fast/middle/slow tiers because top is what we sort on. */
+    function liveKinds(){
+      var seen={},out=[],i,u;
+      for(i=0;i<VEH.length;i++){u=VEH[i].userData;
+        if(u.state==='gone'||u.state==='wreck'||!ok(u.x)||!ok(u.z))continue;
+        if(!seen[u.kind]){seen[u.kind]=1;out.push(u.kind);}}
+      out.sort(function(a,b){return VK[b].top-VK[a].top;});
+      return out;
+    }
+    var kinds=liveKinds(),out=[],ki;
+    for(ki=0;ki<3&&ki<kinds.length;ki++){
+      var car=carOf(kinds[ki]);
+      if(!car){out.push(VK[kinds[ki]].n+':absent');continue;}
+      var cu=car.userData,st;
       if(P.mode==='veh'){JP.act=1;step(30,null);}
       if(P.mode!=='foot'){out.push('cannot-unboard');break;}
-      cu.x=cS.x;cu.z=cS.z;cu.a=headingOf(cS);cu.vx=cu.vz=0;cu.speed=0;
-      cu.thr=0;cu.steer=0;cu.hb=0;cu.state='parked';cu.hp=cu.d.hp;
+      cu.hp=cu.d.hp;
+      st=stageCar(car);
       tp(cu.x+2*Math.cos(cu.a+Math.PI/2),cu.z+2*Math.sin(cu.a+Math.PI/2),cu.a);
       step(2,null);JP.act=1;step(6,null);
       if(P.mode!=='veh'){out.push(VK[cu.kind].n+':no-enter '+JSON.stringify(nearDbg()));continue;}
@@ -540,20 +639,173 @@ try{
         var spv=P.veh?P.veh.userData.speed:0;
         if(ok(spv))peak=Math.max(peak,spv);sm.push(r1(spv));}
       out.push({k:VK[cu.kind].n,top:cu.d.top,acc:cu.d.acc,peak:r1(peak),
-        ratio:r1(peak/cu.d.top),samp:sm.join(' '),fx:fxRep().on});
+        ratio:r1(peak/cu.d.top),samp:sm.join(' '),wall:st.wall,pre:st.pre,
+        avail:st.avail,at:st.at,pushed:st.pushed,fx:fxRep().on});
       if(P.veh){JP.act=1;step(30,null);}
     }
-    R.topSpeed=out;
+    R.topSpeed={fleet:kinds.map(function(k){return VK[k].n+':'+VK[k].top;}),runs:out};
   })();
   var f0=H.frames;
   for(var t=0;t<40;t++){step(30,{up:1,right:(t%3===0)});step(30,{up:1,left:(t%5===0)});render();}
   R.soak={frames:H.frames-f0,veh:VEH.length,ped:PED.length,box:PARKBOX.length,
     bad:actorScan(),hp:GS.hp,wanted:GS.wanted,x:r1(P.x),z:r1(P.z)};
+  /* ---- chunk 4c: guns, police, death, missions. These run LAST: they move
+     GS.wanted/GS.mode/GS.mission around, which must not perturb anything above. */
+  /* The 2400-frame soak walks the player through traffic and can legitimately
+     end dead; tryFire ignores input while dead, so wait out the respawn rather
+     than reporting a phantom 0-shot window. */
+  if(GS.mode==='dead'){R.soakDied=1;step(180,null);}
+  if(P.mode==='veh'){JP.act=1;step(30,null);}
+  /* Deterministic hit. Relocate the nearest live ped onto the muzzle line (same
+     trick runOver uses): with a random crowd a miss only proves bullets expire,
+     which is exactly the bug (endpoint tunnelling) this test exists to catch. */
+  (function(){
+    /* Stage on a verified-open corridor before shooting. blocked() is height-gated
+       (0.15 for a bolt) and counts parked vehicles too, so firing from wherever the
+       2400-frame soak happened to stop -- i.e. in traffic -- killed every bolt on
+       frame 1. The tell was live spark+dust FX with kills:0 and probe after1:0.
+       Probe at BULLET height, not the 1.9 m vehicle height the drive tests use.
+       wallAhead() returns 0 for "clear within d", so a hit must be non-zero. */
+    var gst=null;
+    for(var gi=0;gi<=CFG.NX&&!gst;gi++){
+      for(var gj=0;gj<=CFG.NZ;gj++){
+        var gxp=Math.round((gi+0.5)*CFG.STRIDE),gzp=Math.round(gj*CFG.STRIDE);
+        if(gxp<CFG.R0||gxp>CFG.WX||gzp<CFG.R0||gzp>CFG.WZ)continue;
+        for(var gk=0;gk<2;gk++){
+          var ga=gk?Math.PI:0,wf=wallAhead(gxp,gzp,ga,24,0.15,0.15);
+          if(wf&&wf<24)continue;
+          tp(gxp,gzp,ga);
+          gst={x:gxp,z:gzp,a:ga,pushed:clearLane(gxp,gzp,ga,26),
+               wall:r1(wallAhead(gxp,gzp,ga,24,0.15,0.15)||24)};
+          break;
+        }
+      }
+    }
+    var tgt=null,gap=1e9,i,u;
+    for(i=0;i<PED.length;i++){u=PED[i].userData;
+      if(!u.alive||u.kind==='cop')continue;
+      var gd=Math.hypot(P.x-u.x,P.z-u.z);
+      if(gd<gap){gap=gd;tgt=PED[i];}}
+    /* Pools are lazy (gun()/pkp()), so touch the accessors before measuring; and
+       a soak respawn leaves wp=fists with zero uzi ammo, which would turn the
+       fire loop into a no-op that reads like "0 shots" instead of a real test. */
+    GS.ammo[2]=200;setWpn(2);
+    var am0=GS.ammo[GS.wp],k0=GS.kills,c0=GS.cash,pk0=pkp().count(),pl=0,drain=0;
+    if(tgt){
+      var aim=Math.atan2(tgt.userData.z-P.z,tgt.userData.x-P.x);
+      P.a=aim;
+      tgt.userData.x=P.x+Math.cos(aim)*3.4;tgt.userData.z=P.z+Math.sin(aim)*3.4;
+      tgt.userData.tx=tgt.userData.x;tgt.userData.tz=tgt.userData.z;
+      tgt.userData.st='idle';tgt.userData.flee=0;
+      /* Sample every frame, not every 5. A 112 m/s bolt crosses the 3.4 m gap in
+         2 frames and is retired by the hit, so step-boundary sampling of a
+         5-frame loop can legitimately read 0 live bullets (bulletsPeak:0 with
+         kills:6) -- that measured the sampler, not the pool. */
+      for(var g=0;g<70;g++){step(1,{fire:1});var cg=gun().count();if(cg>pl)pl=cg;}
+      step(150,null);/* > the uzi bolt's 1.2 s life: the pool must drain itself */
+      drain=gun().count();
+      /* Decisive probe. Fire through the same accessor tryFire uses, then read
+         count() before any step() can retire the bolt. probeNow 0 with probeFire 1
+         means tryFire writes a pool this harness cannot see; probeNow 1 with
+         bulletsPeak 0 means the game retires bolts inside their own spawn frame. */
+      var gp=gunPos(),pf=gun().fire(gp.x,gp.y,gp.z,gp.a,112,14,1.2,0.02,0,null,'p');
+      var pnow=gun().count();
+      step(1,null);
+      var p1=gun().count();
+      var wd=WDEF[GS.wp];
+      R.gunProbe={fire:pf,now:pnow,after1:p1,muzzleY:r1(gp.y),
+        gun:WNAME[GS.wp]+'/spd'+wd.spd+'/dmg'+wd.dmg+'/L'+wd.life+'/rate'+wd.rate,
+        poolSame:gun()===gun()?1:0};
+    }
+    R.guns={mode:P.mode,wp:GS.wp,pedGap0:r1(gap),stage:gst,
+      ammo0:am0,ammo1:GS.ammo[GS.wp],shots:am0-GS.ammo[GS.wp],
+      bulletsPeak:pl,bulletsNow:drain,
+      kills:GS.kills-k0,wanted:GS.wanted,heat:r1(GS.heat),
+      cash0:c0,cashDelta:r1(GS.cash-c0),pickups0:pk0,pickups1:pkp().count(),
+      bad:actorScan(),fx:fxRep(),render:tryRender()};
+  })();
+  /* Police: wanted 3 must raise the fleet to the cap, and dropping the heat must
+     demote every car again (demotePolice), otherwise the city saturates at 4 cops
+     forever. P.inv keeps the cops shooting the player out of this test. */
+  (function(){
+    GS.wanted=3;GS.heat=20;P.inv=60;
+    var peak=0,i,n;
+    for(i=0;i<10;i++){step(30,null);n=countPolice();if(n>peak)peak=n;}
+    var cars=0,copPeds=0;
+    for(i=0;i<VEH.length;i++){var u=VEH[i].userData;
+      if(u.role==='police'&&u.alive&&u.state!=='gone'&&u.state!=='wreck')cars++;}
+    for(i=0;i<PED.length;i++)if(PED[i].userData.alive&&PED[i].userData.kind==='cop')copPeds++;
+    var atPeak={cars:cars,cap:copCap(),copPeds:copPeds,wanted:GS.wanted,hp:r1(GS.hp)};
+    GS.wanted=0;GS.heat=0;
+    step(600,null);
+    R.police={peakCars:peak,atPeak:atPeak,afterCars:countPolice(),
+      wanted:GS.wanted,afterPeds:copPeds===0?0:(function(){var c=0;
+        for(var q=0;q<PED.length;q++)if(PED[q].userData.alive&&PED[q].userData.kind==='cop')c++;
+        return c;})(),
+      hp:r1(GS.hp),bad:actorScan(),fx:fxRep()};
+    P.inv=0;
+  })();
+  /* Death -> WASTED -> auto-respawn, through the real hurtPlayer path (no direct
+     killPlayer/respawnPlayer calls). Catches the corpse still being simulated. */
+  (function(){
+    if(P.mode==='veh'){JP.act=1;step(30,null);}
+    GS.mode='play';GS.hp=1;P.inv=0;GS.wanted=0;GS.heat=0;
+    var lv0=GS.lives,x0=r1(P.x),z0=r1(P.z);
+    hurtPlayer(500,'harness');
+    var dead={mode:GS.mode,hp:GS.hp,lives0:lv0,lives:GS.lives,die:r1(C4C.die)};
+    step(60,null);
+    var mid={mode:GS.mode,moved:r1(Math.hypot(P.x-x0,P.z-z0))};
+    step(180,null);
+    R.death={dead:dead,mid:mid,mode:GS.mode,hp:GS.hp,
+      moved:r1(Math.hypot(P.x-x0,P.z-z0)),lives:GS.lives,inv:r1(P.inv),
+      wp:GS.wp,ammo:GS.ammo.join('/'),wanted:GS.wanted,bad:actorScan(),fx:fxRep()};
+  })();
+  /* Payphone -> dwell -> brief -> auto-begin. LAST, because a live mission makes
+     every later marker/pickup count non-comparable; state restored after. */
+  (function(){
+    function mkVis(){var o={},q;
+      for(q=0;q<MKTAG.length;q++){var g=scene.getObjectByName('marker_'+MKTAG[q]);
+        o[MKTAG[q]]=g?(g.visible?'on':'off'):'absent';}
+      return o;}
+    var ph=null,i;
+    /* The soak can walk the player across a payphone and open its brief, which
+       clears ph.on permanently. Rebuild the board with the game's own
+       resetCityJobs() rather than fabricating a phone, so "no usable phone"
+       still means the job placement itself is broken. */
+    GS.mission=null;GS.brief=null;GS.briefT=0;C4C.job=0;
+    clearEnvelopeFlags();markersClear();
+    resetCityJobs();
+    if(P.mode!=='foot'){JP.act=1;step(30,null);}
+    for(i=0;i<PHONES.length;i++)if(PHONES[i].on){ph=PHONES[i];break;}
+    if(!ph){R.jobs={reason:'no-phone-on',phones:PHONES.length,
+      plots:CITY.plots.length,brief:!!GS.brief,mi:GS.missionIdx};return;}
+    GS.mode='play';GS.hp=100;P.inv=0;GS.wanted=0;GS.heat=0;
+    markersClear();
+    tp(ph.x-1.3,ph.z,0);
+    step(6,null);
+    var vis0=mkVis();
+    step(30,null);/* dwell crosses 0.32 s somewhere in here */
+    var dial={brief:!!GS.brief,briefT:r1(GS.briefT),mi:GS.missionIdx,
+      phoneOn:ph.on,jobClock:C4C.job>0};
+    step(450,null);/* 7.5 s: the 7 s brief clock must have begun the mission */
+    var m=GS.mission;
+    var live=m?{kind:m.kind,name:m.name,need:m.need,lim:m.lim,got:m.got,t:r1(m.t),
+      obj:r1(dist2(P.x,P.z,m.tx,m.tz)),cash:GS.cash,envelopes:(function(){var c=0,L=pkp().list;
+        for(var q=0;q<L.length;q++)if(L[q].on&&L[q].note)c++;return c;})()}:null;
+    var vis1=mkVis();
+    step(240,null);
+    R.jobs={phones:PHONES.length,phone:r1(ph.x)+','+r1(ph.z),visNear:vis0,dial:dial,
+      mission:live,visMission:vis1,stillRunning:!!GS.mission,wanted:GS.wanted,
+      bad:actorScan(),fx:fxRep()};
+    GS.mission=null;GS.brief=null;GS.briefT=0;C4C.job=0;GS.mode='play';GS.wanted=0;GS.heat=0;
+    clearEnvelopeFlags();markersClear();
+  })();
+  R.audit2=audit();
   R.per={frames:H.frames,ms:Date.now()-t0,msPerFrame:r1((Date.now()-t0)/Math.max(1,H.frames))};
 }catch(e){
   slog('DRIVER '+(e.message||e)+' | '+String(e.stack||'').split('\n')[1]);
 }
-R.missing=H.missing;R.prestub=PRESTUB;R.log=H.log;R.errKinds=EKEY;R.pois=H.pois;R.firstBad=H.firstBad;
+R.missing=H.missing;R.log=H.log;R.errKinds=EKEY;R.pois=H.pois;R.firstBad=H.firstBad;
 R.trapErr=H.trapErr;R.trapN=H.trapN;
 R.counts={errs:H.errs,stepErrs:H.stepErrs,rendErrs:H.rendErrs,frames:H.frames,stop:H.stop};
 try{
