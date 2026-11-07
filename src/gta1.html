@@ -3921,13 +3921,18 @@ function integrateVeh(v,dt){
   var u=v.userData,d=u.d,dead=(u.state==='wreck'||u.state==='gone')?0.2:1;
   var f=Math.cos(u.a),g=Math.sin(u.a);
   var fwd=u.vx*f+u.vz*g,lat=-u.vx*g+u.vz*f;
-  if(u.thr>0)fwd+=d.acc*dt*dead*(1-clamp(fwd/(d.top*1.05),0,1));
+  if(u.thr>0)fwd+=d.acc*dt*dead*(1-clamp(fwd/(d.top*1.02),0,1));
   else if(u.thr<0){
     if(fwd>0.8)fwd-=d.brk*dt;
     else fwd-=d.acc*0.62*dt*dead*(1-clamp(-fwd/(d.top*0.45),0,1));
   }
-  fwd-=fwd*0.55*dt;
-  var roll=sgn(fwd)*Math.min(Math.abs(fwd),(u.hb?2.4:0.85)*dt*dead);
+  /* Resistance only bites when the throttle is off: under power the engine
+     pulls through rolling drag and the (1-v/top) curve alone fixes the ceiling.
+     Applying both while throttled pinned the whole fleet near 6 m/s, so d.top
+     never meant anything and police cars could not chase anyone. */
+  fwd-=fwd*(u.thr>0?0.06:0.5)*dt;
+  var roll=sgn(fwd)*Math.min(Math.abs(fwd),
+            (u.hb?2.4:(u.thr>0?0.2:0.95))*dt*dead);
   fwd-=roll;
   if(u.thr===0&&Math.abs(fwd)<0.12)fwd=0;
   u.vx=fwd*f-lat*g;u.vz=fwd*g+lat*f;
@@ -4323,7 +4328,7 @@ function footMove(dt){
 /* --------------------------------------------------- entering / leaving */
 function tryEnterVehicle(){
   if(P.mode==='veh')return;
-  var best=null,bd=3.4;
+  var best=null,bd=3.4*3.4;
   for(var i=0;i<VEH.length;i++){
     var v=VEH[i],u=v.userData;
     if(!u.alive||u.state==='gone'||u.state==='wreck')continue;

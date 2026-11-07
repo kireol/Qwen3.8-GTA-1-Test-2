@@ -1,7 +1,9 @@
 # PROJECT STATE — gta1 (web remake of Grand Theft Auto 1)
 
-Last updated: 2026-11-06, mid-session (saved because the user is restarting the machine).
-Chunks 1–4b are written and runtime-verified. **Chunk 4c and chunk 5 are still unwritten.**
+Last updated: 2026-11-06, end of the chunk-4b verification pass.
+Chunks 1–4b are written and runtime-verified **including the driving, boarding, crash-damage
+and run-over paths** (they were unread last session because boarding failed). **Chunk 4c and
+chunk 5 are still unwritten.**
 
 ## Current objective
 Deliver ONE self-contained HTML file (`src/gta1.html`) that is a playable web version of
@@ -19,39 +21,22 @@ Standing user instructions:
 - **"Are you updating PROJECT_STATE.md?"** → keep this file current *as work proceeds*, not
   only at the end. (In force permanently.)
 
-## STOP-HERE STATE (this restart)
-Nothing is broken or half-edited. `src/gta1.html` is 4556 lines and `node --check`-clean
-(`FULL_SYNTAX_OK` printed on the last run). The last harness run succeeded.
-Working tree has **uncommitted verified work** — commit it (see "Git" for the exact command
-and what is verified).
+## Checkpoint state (all verified)
+Nothing is broken or half-edited. `src/gta1.html` is **4560 lines**, `node --check`-clean
+(`FULL_SYNTAX_OK`), and the last full harness run is **clean**:
+`counts {errs:0, stepErrs:0, rendErrs:0, frames:6263}`, `log []`, `missing {}`,
+`nanTot {pos:0,uv:0,col:0,nrm:0,tris:0}`, `render0/1/2:"ok"`, `audit0.bad []`,
+`audit1.bad []`, `probe` 43/43 materials ok, `rsScan.n:0`, `vkBad []`, `bad:0` everywhere.
 
 ### The very next action (in order)
-1. **Fix the real enter-radius bug** — `src/gta1.html` line 4327 in `tryEnterVehicle()`:
-   ```js
-   var best=null,bd=3.4;
-   ...
-   var d=dist2(u.x,u.z,P.x,P.z);
-   if(d<bd){bd=d;best=v;}
-   ```
-   `d` is a **squared** distance compared against a **linear** 3.4 ⇒ the real radius is
-   1.84 u, so a player standing 2.0–2.2 u beside a car (i.e. next to the door of a ~4 u car)
-   often gets `NO CAR HERE`. Fix: `var best=null,bd=3.4*3.4;` (keep `bd=d` — it still tracks
-   the minimum squared distance correctly).
-2. **Fix the harness's `fxRep()` reporting** in `tests/harness/mk_smoke.js` — `p.live` is an
-   **array of particle records**, so `live:s.join(',')` printed `[object Object]` ×hundreds
-   (it bloated the report to 35 KB). Count instead: `p.live.reduce((n,p)=>n+(p.on?1:0),0)`.
-3. Re-run the pipeline (§ "Reproduce a report") and read `crash runOver fx0 render2 probe`
-   — all four are still **unread** because both scenarios reported `no-enter` (cause = bug 1).
-   Expect after the fix: `crash` → hp < 100, `cu.state` wreck-ish, camShake > 0, vhp < 100;
-   `runOver` → `runOver>=1`, `kills>=1`, `wanted` rises; `fx0.live` → small non-zero counts
-   after the skid-producing turn; `render2:"ok"`.
-4. Commit (verified work, no push — there is no remote).
-5. Write **chunk 4c** at the `/*__CHUNK__*/` marker (line **4548**), then **chunk 5**.
-   Runtime-confirmed contract — `R.missing` from the last run is exactly:
+1. Write **chunk 4c** at the `/*__CHUNK__*/` marker (line **4553**). Runtime-confirmed
+   contract — the names the engine reaches for are exactly:
    `syncCase, aiDrive, aiPed, policeAlarm, tryFire, dropMoney`
-   plus `populateCity` aborting on **"bullets is not defined"** (`clearActors()` reads it).
-   Details in § "Chunk 4c contract" (Outstanding section).
-6. Then chunk 5 (HUD/map/title/main loop/`boot()`), then the single consolidated final report.
+   plus `bullets/markers/pickups` + `markersClear()/pickupsClear()` (read by `clearActors()`)
+   and `killPlayer()`. Details in § "Chunk 4c contract".
+   **When 4c lands, delete the harness shim block** (`grep -n "TEMPORARY chunk-4c shims"
+   tests/harness/mk_smoke.js`) and the `PRESTUB` array — they are masking real bugs.
+2. Then **chunk 5** (HUD/map/title/main loop/`boot()`), then the single consolidated report.
 
 ## Reference findings
 - `gta.webm` (7m18s, 1280x720 AV1) is a retrospective capture of the original engine.
@@ -103,6 +88,24 @@ and what is verified).
   `Matrix3.copy(undefined)` → *"Cannot read properties of undefined (reading 'elements')"*.
   Convention enforced in code: **`TEX.*` are canvases; every GPU map goes through `spr(k)`**
   (one cached `THREE.Texture` per sheet). Pools (`PtPool`, `DecalPool`) take a Texture.
+- `runOver(v)` @~4061 requires `Math.abs(u.speed)>=2.6`, a ped within 4 u *and* inside the
+  car box (`Math.abs(lx)>u.lenr*0.74||Math.abs(lz)>u.winr*0.80` rejects it), and **credits
+  only `u.role==='player'`**. `enterVehicle` sets `u.role='player'`; `exitVehicle` restores
+  `'civ'/'parked'`. **VERIFIED end-to-end this session** (`runOver:1, kills:1, wanted:1`).
+- `tryEnterVehicle()` @4330: `dist2()` is **squared**, so the threshold must be squared too
+  (`bd=3.4*3.4`). With the old `bd=3.4` the effective radius was 1.84 u and boarding a ~4 u
+  car from beside its door usually failed. **Fixed + VERIFIED this session.**
+- **`tryEnterVehicle` takes the NEAREST live vehicle**, so a staging harness cannot dictate
+  which car the player gets — traffic beats a parked prop car to the button (a BIKE at
+  1.12 u won over a staged car at 1.41 u). Board, then read `P.veh.userData` and rebind every
+  scenario local. Test a *radius* change with an isolated car instead (`boardIsolated`).
+- **A chunk-4c name that throws inside a callee silently skips the caller's scoring.**
+  `killPed()` does `GS.kills++;GS.score+=20;` then calls `dropMoney()` (undeclared until
+  4c), so the ReferenceError escaped `runOver()` and its `GS.runOver++ / score += 25 /
+  camShake / crime(1.5)` never ran — the symptom was `kills:1, runOver:0, wanted:0`.
+  Symptom-driven `missing` lists can therefore *under*-report which names matter.
+- **Bikes (hp 40) wreck on contact**, so a physics scenario that boards "any live car" can
+  silently measure an explosion instead of a sustained deceleration. Board `hp>=85`.
 - **`FX` pools do not exist until `initFX()` runs.** `initFX()` is defined at line 3638 and
   is **never called anywhere in the file** — chunk 5 must call it after `buildCity`. Until
   then `skid()/bloodSplat()` throw *"Cannot read properties of undefined (reading 'put')"*.
@@ -136,26 +139,23 @@ and what is verified).
   only queue demand.
 - `killPlayer()` must NOT call `clearActors()` mid-step (`hurtPlayer`→`killPlayer` runs
   inside the VEH loop).
-- `runOver(v)` @4051 requires `Math.abs(u.speed)>=2.6`, a ped within 4 u *and* inside the
-  car box, and **credits only `u.role==='player'`**. `enterVehicle` @4337 does set
-  `u.role='player'` (verified by reading); `exitVehicle` restores `'civ'/'parked'`.
-- `tryEnterVehicle()` @4325: **squared-distance vs linear-threshold bug still open** (see
-  § "STOP-HERE STATE" step 1).
 
 ## Completed (verified)
 - Reference study (video segments + Wikipedia).
-- **Chunks 1–4b** written; file is **4556 lines**, `node --check` clean:
+- **Chunks 1–4b** written; file is **4560 lines**, `node --check` clean:
   1. head/CSS/loader + config + seeded RNG + procedural texture factory
   2. geometry builder + city generation + colliders/spatial hash
   3. scene/lights/camera + actor factories (player, vehicles, peds)
   4a. FX core (points pools, decals, `explode`), audio (`SND`), input
   4b. vehicle physics, collisions, damage/wrecks, crowd spawn/despawn, camera, engine audio
-- **Headless verification pipeline works end-to-end** (~2 s/run; 5040 frames + ~70 renders
-  in 527 ms ⇒ `msPerFrame:0.1`; SwiftShader software GL).
-- **All non-finite geometry eliminated — VERIFIED this session:**
-  `nanTot {pos:0,uv:0,col:0,nrm:0,tris:0}`, `audit0.bad []`, `nanSrc []`,
-  321 meshes, `city {stat:314, plots:70, spawn:844, bad:0}`, `render0/1:"ok"`,
-  `probe`: all 23 materials `ok`, `counts {errs:0, rendErrs:0}`, `errKinds {}`.
+- **Headless verification pipeline works end-to-end** (~2 s/run, 6263 frames + ~70 renders
+  in 1860 ms ⇒ `msPerFrame:0.3`; SwiftShader software GL). `tests/harness/run.sh <keys>`
+  now wraps the whole pipeline in one command.
+- **All non-finite geometry eliminated — VERIFIED:**
+  `nanTot {pos:0,uv:0,col:0,nrm:0,tris:0}`, `audit0.bad []`, `audit1.bad []`, `nanSrc []`,
+  `city {stat:314, plots:70, spawn:844, bad:0}`, `render0/1/2:"ok"`,
+  `probe`: 43/43 materials `ok` (6 `ShaderMaterial/Points` among them),
+  `counts {errs:0, stepErrs:0, rendErrs:0}`, `log []`.
   The real bugs the tri-trap found and that were fixed (each verified):
   1. `Builder.extrudeP` (4 sites) passed a whole `[x,z]` pair where X belongs → NaN
      positions through `tube`→`gtube` (every pole/post/fence rail). Fixed to `b2[0]/a2[0]`.
@@ -168,61 +168,89 @@ and what is verified).
      `flat(x0+1.2+i*2.9,z0+2.4,x0+1.2+i*2.9+0.06,z1-2.4,top+0.013,col(0xf0efe4),T.WHITE);`
   5. (earlier sessions, already verified) `initLights()` missing from `initGL()`, `PANTS[5]`
      off-by-one, the canvas-as-`map` render crash.
-- **fix6 (`integrateVeh` throttle commit) VERIFIED this session:**
-  `driveFree` (TAXI, `top:16`) `sp` = 2.36, 3.82, 4.72, 5.28, 5.63, 5.84, 5.97 over 0.5 s
-  steps → smooth asymptote, τ≈1 s, no oscillation. `braked sp:0`, `driveFreeStop sp:0`,
-  `reverse sp:-2.64`, `drive sp:5.28`, `turnLeft da:-0.62 dx:0.62 dz:-1.97` (the car now
-  actually translates and turns — earlier `d=0`/`dx=0` readings were the harness measuring
-  the seated player, see § In progress).
+- **Boarding VERIFIED (enter-radius fix):** `enter {car:TRUCK, iso:17.32, seq:"V:TRUCK"×8,
+  same:true, bad:0}` — the player boards first try and is **not** ejected over 8 consecutive
+  frames. `enterFb:null`. Earlier symptom was `NO CAR HERE` / instant re-ejection.
+- **Driving physics VERIFIED while genuinely seated:**
+  `pureSim` per-kind asymptotes respect `d.top`/`d.acc` — TAXI top16 → 13.06, SPORT top26 →
+  22.2, BUS top12 → 9.04 (12 samples, all `fin:true`, `dA:0`, no oscillation).
+  `driveFree` (BIKE top24) 4.78→17.66 m/s over 3.5 s, 39.8 u travelled.
+  `turnLeft da:-4.25 dx:-11.29 dz:10.01` (real translation + yaw), `braked sp:0`,
+  `driveFreeStop sp:0`, `reverse sp:-1.65`.
+  `driveFreeTurn.fx {on:2, live:"fire:0,spark:1,smoke:1,…"}` ⇒ skid/impact FX really emit.
+- **Crash damage VERIFIED (sturdy TRUCK, hp200, 26 m/s into real collider geometry):**
+  `crash {state:"drive", vhp:173.15/200, dmg:26.85, minSpeed:0.11, gap0:16 → gapEnd:9.17,
+  hp:97.64 from hp0:99.05, peakShake:0.12, wanted:0, bad:0}` — the truck is stopped dead by
+  the building and the player takes collision damage. `crashBoard.wanted:1` came from the
+  `CAR STEALEN` crime, i.e. the wanted system reacts to theft but **not** to a building
+  hit — matches the original.
+- **Run-over credit VERIFIED:** `runOver {runOver:1, kills:1, wanted:1, ped:"dead",
+  gap:1.83, pedGap0:32.35}` — the full `runOver`→`killPed`→`crime` chain now credits.
+- **`populateCity` completes:** `pop {veh:208, ped:26, box:190, bad:0}` (was `veh:0` when
+  `clearActors()` threw on the undeclared `bullets`). `maintain` trims to ~29/26/12 by the
+  end of `soak`.
 - On-foot movement verified exactly: walk `dz:5.03` in 90 frames @3.35 m/s, `run dz:6.1`
-  @6.1 m/s, `dx:0` for both (screen-relative). Island boundaries hold: `edgeWest` a=3.14
-  ends x=235.06, `edgeNorth` a=1.57 ends z=230.07, both `hp:100 inWater:0 bad:0` (they
-  previously shared one frozen coordinate — that was the harness key-leak bug).
-- `idle {veh:9,ped:12}` from `maintain`; `soak` 2400 frames: veh 19 / ped 26 / box 1,
-  `bad:0`, hp 100 — no actor leaks, no NaN actors over 40 s of driving-with-turns.
-- `initFX()` now exercised: `fx0 {pools:6, decals:3, skid:true, fire:true}` and the
-  `skid`→`put` step error is gone (`errKinds {}`).
+  @6.1 m/s, `dx:0` for both (screen-relative). Island boundaries hold: `edgeWest` a=3.14,
+  `edgeNorth` a=1.57, both `hp:100 inWater:0 bad:0`.
+- `soak` 2400 frames (continuous throttle + periodic turns): veh 30 / ped 26 / box 12,
+  `bad:0`, hp 96.9 — 3.1 hp of traffic damage over 40 s, no actor leaks, no NaN actors.
+- `roadSnap` is NaN-free across the whole world box: `rsScan {n:0, off:[]}` over an
+  45×33 lattice; `vkBad []`.
+- `initFX()` exercised: `fx0 {pools:6, decals:3, skid:true, fire:true}`; the `skid`→`put`
+  step error is gone.
 
-## In progress
-- **Harness corrections made this session (all harness, not game):**
-  - `step()` clears **all** of `KEY` every frame (old version leaked `left`/`run` into the
-    next scenario; that is why `edgeWest`/`edgeNorth` once shared `(261.73,245.94) a:2.36`).
-  - `crash`/`runOver` no longer teleport into building interiors; they road-snap via
-    `roadSnap()`+`headingOf()`. `crash` now enters on open road and *then* aims the car at
-    `insideBuilding()`; `runOver` drags one live ped 9 u ahead of the car so the test is
-    deterministic (`ppu.st='idle';ppu.flee=0;ppu.tx/tz` pinned).
-  - `cx()/cz()` measure the car, not the seated player (see invariant).
-  - `initFX()` is called after `buildCity`, and `fxRep()` reports pool contents (currently
-    over-prints — needs the `p.on` count fix, step 2 above).
-  - New report keys: `fx0`, `render2`, `nanTot`, `nanSrc`, `driveFree*`.
-- Both `crash` and `runOver` reported `no-enter` on the last run purely because of the
-  open `tryEnterVehicle` squared-distance bug. Unread: `crash`, `runOver`, `render2`,
-  `fx0.live`. (`enter` and `parkKind:"parked:TAXI"` were fine.)
+## Harness state (`tests/harness/mk_smoke.js`, 574 lines)
+- **Two TEMPORARY shim blocks exist right after `var UI={w:1280,h:720};` — they mask real
+  bugs and must be deleted when chunk 4c lands:**
+  1. `var bullets=null,markers=null,pickups=null;` at driver top level — because the driver
+     is spliced **inside the game IIFE**, a top-level `var` there lands in *game* scope,
+     which is what lets `clearActors()` finish and `populateCity()` populate.
+  2. `PRESTUB=['syncCase','aiDrive','aiPed','policeAlarm','tryFire','dropMoney']` — installed
+     as `window[name]` no-ops *before* the game runs, so the escaping ReferenceErrors that
+     silently skipped `GS.runOver++` / `crime()` stop eating real scoring.
+     **`killPlayer` is deliberately NOT pre-stubbed** — it must stay visible as a 4c
+     requirement. `shoot` is consequently uninformative (`ammo0:999 ammo1:999 kills:0`)
+     because `tryFire` is a no-op.
+- Scenario hardening this session: `boardIsolated(minHp)` (scores live cars by isolation,
+  `+10` if parked, skips `hp<minHp`, teleports to the door, samples 8 × 1-frame steps) is the
+  radius regression test and the boarder for `crash`/`runOver`; `nearBlocked(x,z)` replaced
+  the dead `insideBuilding()` (it returned the first `CITY.plots` entry *anywhere*, so the
+  crash test never reached geometry); `enterCar` now returns `null` whenever
+  `P.mode==='veh'` (boarding *a* car is success — `tryEnterVehicle` picks the nearest);
+  `R.enterTrace` logs every candidate within 10 u plus the mode transition; every scenario
+  rebinds its locals to `P.veh.userData` after boarding.
+- `runOver` pins the nearest live ped **2.5 u ahead with a 9 m/s standing start** — a truck
+  needs ~2 s just to reach the 2.6 m/s `runOver` threshold, so the throttle-only version
+  spent the whole window accelerating and measured nothing.
+- `tests/harness/run.sh` encapsulates extract → `node --check` → build → Chrome → `rd.py`;
+  args pass straight through as report keys. `three128.js` is gitignored (refetch from the
+  cdnjs r128 URL). `tmp/rd.py` and `.qwen/skill-curator.json` are pre-existing untracked
+  scratch — left alone, not staged.
 
 ## Outstanding / next actions
-1. `tryEnterVehicle` radius fix + `fxRep` counting fix → re-run → read `crash runOver
-   render2 fx0` (see STOP-HERE).
-2. Commit the verified work.
-3. **Chunk 4c** at the `/*__CHUNK__*/` marker (line **4548**). Contract from real call sites
-   *and* the runtime `R.missing` list (`syncCase, aiDrive, aiPed, policeAlarm, tryFire,
-   dropMoney`):
+1. **Chunk 4c** at the `/*__CHUNK__*/` marker (line **4553**). Contract from real call sites
+   *and* the runtime names the engine reaches for (`syncCase, aiDrive, aiPed, policeAlarm,
+   tryFire, dropMoney` + `killPlayer`):
    - `syncCase()` — once/frame hook (end of `syncPlayer`); queue-only, never rebuilds arrays
    - `aiDrive(v,dt)` — lane following via `roadSnap`/`nextLeg`/`laneTarget`, right-hand
      traffic, stop-for-obstacle, honk
    - `aiPed(q,dt)` — drives `u.tx/u.tz`, uses `u.flee`, panics on nearby gunfire/crashes
    - `tryFire(dt)` — uses `GS.wp`, `GS.ammo[]`, `WDEF`/`WNAME`, `GS.fireCd`, `GS.firing`;
-     called from both `footMove` (4319) and `driveInput`; bullets via `InstancedMesh`
+     called from both `footMove` and `driveInput`; bullets via `InstancedMesh`
    - `killPlayer()` — busted vs wasted, `GS.lives`, respawn at `P.safe`; no `clearActors()`
    - `policeAlarm()` — called from `crime()` when wanted>0; spawn/queue cop cars (POLICE
      kind exists, `lightbar`)
    - `dropMoney(x,z,money)` — called from `killPed`
    - declare `var bullets,markers,pickups` and define `markersClear()`, `pickupsClear()`
-     (all referenced in `clearActors()`; this is what kills `populateCity` today)
+     (all referenced in `clearActors()`)
    Plus: cop behaviour by wanted level (ram 1–2, shoot 3+, flashing `userData.lights`,
    siren if `SND` exposes it — check the API), pickups over `CITY.plots`/`CITY.marks`, and
    the per-city mission chain in GTA1 briefing wording using `GS.mission/brief/missionIdx/done`,
    `say()`/`bigMsg()`.
-4. **Chunk 5** — HUD + map screen + title screen + main loop + `boot()`. Must declare
+   **Then delete both harness shim blocks + `PRESTUB` and re-run** — with them gone,
+   `R.missing`/`R.log` must stay empty for the chunk to count as done. Add a `shoot`
+   assertion that bullets actually leave the pool and a cop actually spawns at wanted≥1.
+2. **Chunk 5** — HUD + map screen + title screen + main loop + `boot()`. Must declare
    `var UI` (`onResize` writes `UI.w/UI.h`) — and then the harness driver's temporary
    game-scope `var UI={w:1280,h:720};` must be deleted. Must call `initFX()`. Owns
    `GS.clock/GS.t/GS.fps`; calls `stepWorld(dt)` only while `GS.mode==='play'`, then
@@ -232,70 +260,67 @@ and what is verified).
    GTA logo far left, white `$` cash, grey weapon-slot boxes (selected orange), lives,
    wanted stars grey→yellow, health+armour bars right, white bold centred mission text.
    After chunk 5, repoint the harness at the real `boot`/`main`.
-5. Playtest pass (driving feel, spawn density, mission flow) folded into the final report —
+3. Perf check before finishing: `populateCity` creates **208 vehicles / 190 park boxes**
+   (`audit1` counts 1019 meshes + 236 groups live); `maintain` trims to ~29 active vehicles,
+   but the parked fleet is still 190 groups of draw calls. Confirm the frustum culling /
+   `maintain` behaviour is enough or park-box visibility needs hiding.
+4. Playtest pass (driving feel, spawn density, mission flow) folded into the final report —
    no intermediate checkpoint.
 
 ## Known issues / blockers
-- **`tryEnterVehicle` effective radius 1.84 u** — open real bug, blocks the two harness
-  scenarios (`crash`, `runOver`) from even starting.
-- `populateCity()` aborts early on **"bullets is not defined"** (chunk-4c name read in
-  `clearActors()`) ⇒ `R.pop {veh:0,ped:0,box:0}` is unreliable; `idle` later shows veh:9
-  /ped:12 from `maintain`. Resolves when 4c declares those names.
-- `stepErrs:5` on the last run are the 5 `MISSING` chunk-4c stubs — expected, not new.
+- **The harness currently lies in two places** (the shim block + `PRESTUB`, see § Harness
+  state): `pop`/`runOver` pass *because of* the shims, and `shoot` cannot fail. Both are
+  chunk-4c placeholders, not green tests.
 - Unverified still: whether `PtPool`'s `ShaderMaterial` (custom attrs position/aC/aS/aA)
   actually *renders* correctly (it exists and emits without error; a screenshot pass is the
-  only real check); the audio graph.
-- `soak hp:100` — the soak never took damage; `crash` will be the damage-path test.
+  only real check); the audio graph; anything involving chunk 4c/5 code.
+- `peakShake:0.12` on a full-speed building hit looks small — worth a sanity look when 4c
+  touches camera (`camUpdate`), but not a correctness failure.
 - No git remote. Nothing is pushed anywhere.
 
 ## Git
 Branch `main`, identity `kireol / 3438792+kireol@users.noreply.github.com`, **no remote**.
-Commits so far: `254dbcc` baseline (chunks 1–4a), `a4f538c` chunk 4b, `add6241`
-foot-velocity fix + boundary walls.
-**Uncommitted, all harness-verified this session:** `extrudeP` 4 sites, `containerAt`
-`col()`, `treeAt` 4-corner `cs`, `lotGarage` `flat()` arity, plus earlier `initLights()`
-wiring, dead-`EO` removal, `makePed` palette indices, `spr()` texture routing, fix6
-`integrateVeh` throttle commit, this PROJECT_STATE.md, and `tests/harness/` (the harness
-moved out of `/tmp` so it survives a reboot).
-Commit command (do **not** push, there is no remote):
-`git add -A && git commit -m "fix NaN geometry (extrudeP/containerAt/treeAt/lotGarage), commit integrateVeh throttle; verified headless"`
+Commits: `254dbcc` baseline (chunks 1–4a), `a4f538c` chunk 4b, `add6241` foot-velocity fix +
+boundary walls, `ba13cd0` NaN-geometry fixes + driving physics.
+The pass that ends at this checkpoint commits: `tryEnterVehicle` squared-radius fix and the
+`integrateVeh` throttle-vs-drag retune (both game, both verified), the harness hardening
+(`boardIsolated`/`nearBlocked`/`enterTrace`/scenario rebinding + the two temporary shim
+blocks), `tests/harness/run.sh`, and this file. **Never stage `tmp/` or
+`.qwen/skill-curator.json`** — pre-existing scratch that is not mine. Stage explicit paths
+(`src/gta1.html tests/harness/… docs/agent/PROJECT_STATE.md`), never `git add -A`.
 
 ## Important files
-- `src/gta1.html` — the entire deliverable (4556 lines; tail is `/*__CHUNK__*/` at 4548,
+- `src/gta1.html` — the entire deliverable (4560 lines; tail is `/*__CHUNK__*/` at 4553,
   then `})();`, `</script>`, `</body>`, `</html>`).
 - `docs/agent/PROJECT_STATE.md` — this checkpoint.
-- `tests/harness/mk_smoke.js` — **the harness builder** (was `/tmp/mk_smoke.js`; copy it
-  back to `/tmp` or adjust paths — it reads `three128.js` relative to cwd and writes
-  `/tmp/gta_smoke.html`).
-- `tests/harness/rd.py` — report pretty-printer with optional key filter (was `/tmp/rd.py`).
+- `tests/harness/run.sh` — **one-command pipeline**; args are report keys. Read it before
+  re-running anything by hand.
+- `tests/harness/mk_smoke.js` — the harness builder (574 lines). Reads
+  `three128.js` relative to cwd, writes `/tmp/gta_smoke.html`. The driver is spliced **inside
+  the game IIFE** (before `})();`), so its top-level `var`/`function` land in game scope and
+  can reassign `tryEnterVehicle`/`UI`/`bullets`. It is a `String.raw` template ⇒ **no
+  backticks and no `${` in driver text** (a stray backtick = `SyntaxError: Unexpected
+  identifier` in the builder).
+- `tests/harness/rd.py` — report pretty-printer with optional key filter.
 - `tests/harness/three128.js` — three.js r128 min (603445 B), gitignored; refetch from the
   cdnjs r128 URL in `src/gta1.html` if missing.
-- `.qwen/tmp/clips/seg*.mp4` — sampled reference footage. `docs/images/`, `tests/` — empty.
+- `.qwen/tmp/clips/seg*.mp4` — sampled reference footage. `docs/images/` — empty.
 - Scratch in `/tmp` (may not survive reboot): `gta_extract.js`, `gta_smoke.html`,
-  `dom.html`, `chrome.err`, `undeclared.js` (RUN, clean), `depth.js`, `fix2/3/5/6.js`
-  (all RUN; **fix4 was wrong, never run**), `/tmp/missing.js` **HANGS (catastrophic
-  backtracking) — do not run.**
+  `dom.html`, `chrome.err`, `rep1.json` (last full report), `undeclared.js` (RUN, clean),
+  `/tmp/missing.js` **HANGS (catastrophic backtracking) — do not run.**
 
 ## Reproduce a report
 ```
-cd $HOME/projects/gta1 \
- && awk '/^<script>/{f=1;next}/^<\/script>/{f=0}f' src/gta1.html > /tmp/gta_extract.js \
- && node --check /tmp/gta_extract.js && echo FULL_SYNTAX_OK
-cp tests/harness/mk_smoke.js tests/harness/rd.py tests/harness/three128.js /tmp/
-node /tmp/mk_smoke.js     # builds /tmp/gta_smoke.html (cdnjs URL -> three128.js; driver
-                          # spliced in before the final })(); )
-cd /tmp && "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader \
-  --window-size=1280,720 --virtual-time-budget=60000 --dump-dom file:///tmp/gta_smoke.html \
-  2>/tmp/chrome.err > /tmp/dom.html
-python3 /tmp/rd.py gl city pop render0 render1 audit0 nanTot nanSrc probe idle walk run \
-  epre edgeWest edgeNorth parkKind enter drive turnLeft braked reverse driveFree \
-  driveFreeTurn driveFreeStop crash exit shoot runOver soak per fx0 render2 missing log \
-  errKinds counts
+cd $HOME/projects/gta1
+sh tests/harness/run.sh counts log missing nanTot render0 render1 render2 pop audit0 audit1 \
+  probe rsScan vkBad pureSim per idle soak enter enterFb parkKind drive turnLeft braked \
+  reverse driveFree driveFreeTurn driveFreeStop driveFreeBoard crashBoard crash \
+  runOverBoard runOver runPre shoot exit fx0 gl city walk run edgeWest edgeNorth
 ```
-Chrome **must** run with cwd=`/tmp` (relative `three128.js`). `/tmp/rd.py` parses
-`<pre id="out">` → `html.unescape` → `json.loads(t.strip()[2:-2])`, and filters top-level
-keys when argv is given.
+That is the current full key set; the script does extract → `node --check` (prints
+`FULL_SYNTAX_OK`) → build → Chrome (`--headless=new --use-angle=swiftshader
+--enable-unsafe-swiftshader --virtual-time-budget=60000 --dump-dom`, cwd forced to `/tmp`
+because `three128.js` is a relative path there) → `python3 /tmp/rd.py <keys>`.
 - `audit()` **dedupes** by attr/itemSize/material ⇒ its `n=` is only the FIRST offending
   tile, not a total. `R.nanTot` (trap totals) is authoritative.
 - **Line mapping:** harness-reported HTML line *N* == `src/gta1.html` line *N*. For
@@ -310,11 +335,13 @@ keys when argv is given.
 An earlier incoming snapshot contained claims that were never tool output — a
 `roadLanePoint`-based spawn, "patch H", a chunk-5 HUD insert with `renderStatus`/`hudFont`/
 `panel`, `/tmp/gta_src.html`, and fabricated harness numbers (`P.x=-961.8`, `maxdx=875.5`,
-"buildCity is not defined"). Every number in this file came from real tool output. The real
-file *does* contain `roadSpawnPoint` (confirmed by the function inventory) — that name is
-legitimate; only the fabricated *results* were untrustworthy.
+"buildCity is not defined"). Every number in this file came from real tool output (`/tmp/rep1.json`
+is the last full report). The real file *does* contain `roadSpawnPoint` (confirmed by the
+function inventory) — that name is legitimate; only the fabricated *results* were
+untrustworthy.
 
 ## Next action
-Steps 1–6 of § "STOP-HERE STATE": fix `tryEnterVehicle`, fix `fxRep()`, re-run and read
-`crash runOver render2 fx0`, commit, then write chunk 4c at line 4548 and continue into
-chunk 5 — per "start using git locally from here. keep grinding straight through".
+Write **chunk 4c** at line 4553, delete the two harness shim blocks + `PRESTUB`, re-run
+`sh tests/harness/run.sh …` and require `missing {}` / `log []` with the shims gone, then
+continue into chunk 5 — per "start using git locally from here. keep grinding straight
+through".
