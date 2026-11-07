@@ -4509,8 +4509,14 @@ function stepWorld(dt){
   }
   if(P.inv>0)P.inv-=dt;
   if(GS.starT>0)GS.starT-=dt;
-  if(P.mode==='foot')footMove(dt);
-  else if(P.veh)driveInput(P.veh,dt);
+  /* Input is diegetic to 'play' only. footMove/driveInput read raw keys, so an
+     ungated call let the title card and the pause screen steer the actor. In
+     'dead' the car must keep rolling: killPlayer() already zeroed thr and set
+     hb, and stepVehicle() does the braking without any input call. */
+  if(GS.mode==='play'){
+    if(P.mode==='foot')footMove(dt);
+    else if(P.veh)driveInput(P.veh,dt);
+  }
   var i;
   for(i=0;i<VEH.length;i++){
     var v=VEH[i],u=v.userData;
@@ -5570,7 +5576,7 @@ function beginMission(mi){
   GS.briefT=0;
   C4C.job=0;
   bigMsg('MISSION STARTED',m.name);
-  say(m.brief,3.6);
+  say(def.brief,3.6);   /* m is the run record; the brief lives on the missionDefs entry */
   SND.menu();
 }
 function clearEnvelopeFlags(){
@@ -5675,7 +5681,9 @@ function runMission(dt){
 /* hook 3 of 5: brief clock, payphones, mission clock, respawn. */
 function missionStep(dt){
   if(GS.mode==='dead'){
-    if(C4C.die<=0)respawnPlayer();
+    /* killPlayer() already floored GS.lives at 0, so without this gate the last
+       life respawns forever and the run can never end. */
+    if(C4C.die<=0){ if(GS.lives>0)respawnPlayer(); else gameOver(); }
     return;
   }
   if(GS.mode!=='play')return;
@@ -5713,6 +5721,602 @@ function missionStep(dt){
 
 
 
+
+/* ===== chunk 5: HUD, screens, main loop, boot ===== */
+/* ============================================================================
+   CHUNK 5 -- the frame, and everything that had no owner before it.
+   Above this line the game could simulate a city but never drive one:
+     * UI was undeclared, so onResize() threw ReferenceError (strict mode) and
+       the real page died inside initGL; it only ever appeared to work because
+       the harness declared a game-scope UI of its own.
+     * initFX() was never called, so FX.fire &co. had no pools.
+     * GS.mode starts on 'title', so nothing gated on mode==='play' ever ran --
+       while footMove/driveInput read raw keys, so input moved the actor on
+       every screen including the title card.
+     * GS.t / GS.clock / GS.fps are read by the actor kit but incremented by
+       nobody; GS.msgT/GS.bigT/GS.fade are set by say()/bigMsg() and decayed by
+       nobody, so the first banner would have stuck forever.
+   This chunk owns the mode machine (title/play/map/pause/dead/complete/over),
+   the canvas HUD, the map screen, and boot(). The headless harness calls the
+   pieces directly and never calls boot(), so no rAF loop starts under test.
+   ============================================================================ */
+
+/* onResize() writes UI.w/UI.h. It must be initialised before boot() -> initGL()
+   -> onResize(), which is why the assignment sits above the boot() call at the
+   very tail. Every layout number below derives from it, so the HUD scales from
+   640x360 to 4K without a single hard-coded pixel. */
+var UI={w:1280,h:720};
+var HUDC={hi:0,sel:0,unlocked:1};   /* persists across runs, like an attract mode */
+var MISSION_N=6;                    /* missionDefs() always yields 6 per city */
+var FB='"Arial Black",Impact,sans-serif';
+var FN='"Arial Narrow",Arial,Helvetica,sans-serif';
+var MONO='"Courier New",monospace';
+var MAPK=1,MAPX=0,MAPZ=0;
+
+/* ---------------------------------------------------------------- 2D kit */
+function hf(px,w,fam){OX.font=(w||700)+' '+px.toFixed(1)+'px '+(fam||FN);}
+function tx(t,x,y,fill,px,w,fam,al,sh){
+  OX.textAlign=al||'left';OX.textBaseline='middle';hf(px,w,fam);
+  if(sh!==0){
+    OX.fillStyle=(typeof sh==='string')?sh:'rgba(0,0,0,0.8)';
+    var o=Math.max(1,px*0.08);
+    OX.fillText(String(t),x+o,y+o);
+  }
+  OX.fillStyle=fill;OX.fillText(String(t),x,y);
+}
+function rect(x,y,w,h,fill,stroke,lw){
+  if(fill){OX.fillStyle=fill;OX.fillRect(x,y,w,h);}
+  if(stroke){OX.strokeStyle=stroke;OX.lineWidth=lw||1;OX.strokeRect(x+0.5,y+0.5,w-1,h-1);}
+}
+/* one wanted "light" -- GTA1 used a row of lights, not stars */
+function light(x,y,r,fill){
+  OX.beginPath();
+  OX.moveTo(x,y-r);OX.lineTo(x+r,y);OX.lineTo(x,y+r);OX.lineTo(x-r,y);
+  OX.closePath();OX.fillStyle=fill;OX.fill();
+}
+function wrap(t,maxpx){
+  var w=String(t).split(' '),out=[],cur='',i;
+  for(i=0;i<w.length;i++){
+    var nx=cur?cur+' '+w[i]:w[i];
+    if(cur&&OX.measureText(nx).width>maxpx){out.push(cur);cur=w[i];}
+    else cur=nx;
+  }
+  if(cur)out.push(cur);
+  return out;
+}
+function css(c){return '#'+('000000'+((c>>>0)&0xffffff).toString(16)).slice(-6);}
+function mmss(s){
+  if(s<0)s=0;
+  var m=Math.floor(s/60),q=Math.floor(s-m*60);
+  return m+':'+(q<10?'0':'')+q;
+}
+function blink(sp){return ((GS.clock*sp|0)%2)===0;}
+
+/* ------------------------------------------------------------------- HUD
+   Reference layout: black top strip, red logo far left, cash, score, wanted
+   lights, lives, then weapon slots and health/armour flush right. Mission text
+   is centred under the strip; say()/bigMsg() own the rest of the frame. */
+function hudScale(){return clamp(UI.h/720,0.6,1.6);}
+function stripH(){return Math.round(clamp(UI.h*0.086,42,96));}
+function pedGlyph(x,y,r){
+  OX.fillStyle='#e8e8e8';
+  OX.beginPath();OX.arc(x,y-r*0.75,r*0.34,0,TAU);OX.fill();
+  OX.fillRect(x-r*0.30,y-r*0.42,r*0.60,r*0.86);
+}
+function hpBar(x,y,w,h,v,mx,cFull,cMid,cLow,label){
+  var f=clamp(v/mx,0,1);
+  rect(x,y,w,h,'rgba(0,0,0,0.55)','rgba(255,255,255,0.22)',1);
+  if(f>0){
+    OX.fillStyle=(f>0.6)?cFull:((f>0.28)?cMid:cLow);
+    OX.fillRect(x+1,y+1,(w-2)*f,h-2);
+  }
+  tx(label,x+Math.max(3,h*0.28),y+h*0.5,'#0b0b0b',Math.max(8,h*0.62),900,FN,'left',0);
+}
+function drawHUD(){
+  var S=hudScale(),W=UI.w,BH=stripH(),i;
+  rect(0,0,W,BH,'rgba(4,4,6,0.74)');
+  rect(0,BH-2,W,2,'rgba(224,27,27,0.75)');
+
+  /* --- logo block --- */
+  tx('GTA',12*S,BH*0.54,'#e01b1b',BH*0.66,900,FB,'left','#5d0808');
+  var x=12*S+BH*1.42;
+  OX.fillStyle='rgba(255,255,255,0.13)';OX.fillRect(x,BH*0.2,1,BH*0.6);
+  x+=12*S;
+
+  /* --- cash / score --- */
+  tx('CASH',x,BH*0.30,'#8b8b8b',BH*0.19,700,FN);
+  tx('$'+(GS.cash|0),x,BH*0.66,'#ffffff',BH*0.44,900,FB);
+  x+=Math.max(64*S,OX.measureText('$'+(GS.cash|0)).width+8*S)+16*S;
+  OX.fillStyle='rgba(255,255,255,0.13)';OX.fillRect(x,BH*0.2,1,BH*0.6);
+  x+=14*S;
+  tx('SCORE',x,BH*0.30,'#8b8b8b',BH*0.19,700,FN);
+  tx(''+(GS.score|0),x,BH*0.66,'#d8d8d8',BH*0.36,900,FB);
+
+  /* --- wanted lights --- */
+  var lit=Math.min(6,Math.ceil(GS.wanted-0.04));
+  var lw=6*2.55*S,lx=x+Math.max(46*S,OX.measureText(''+(GS.score|0)).width+22*S);
+  tx('WANTED',lx+lw*3,BH*0.30,'#8b8b8b',BH*0.17,700,FN,'center');
+  for(i=0;i<6;i++)
+    light(lx+i*lw+lw*0.5,BH*0.63,lw*0.34,
+          i<lit?((GS.starT>0&&blink(7))?'#ffffff':'#ffd23f'):'#2c2f34');
+
+  /* --- lives --- */
+  var px0=lx+6*lw+10*S;
+  tx('LIVES',px0,BH*0.30,'#8b8b8b',BH*0.17,700,FN);
+  var ln=Math.min(5,Math.max(0,GS.lives|0));
+  for(i=0;i<ln;i++)pedGlyph(px0+i*11*S+S,BH*0.66,7.4*S);
+  if((GS.lives|0)>5)tx('x'+(GS.lives|0),px0+5*11*S+2*S,BH*0.66,'#ffffff',BH*0.26,900,FB);
+  else if(ln===0)tx('none',px0,BH*0.66,'#7a1f1f',BH*0.24,900,FB);
+
+  /* --- health / armour, flush right --- */
+  var barsW=Math.max(150*S,31*S),barX=W-barsW-12*S,barY=BH*0.22;
+  hpBar(barX,barY,barsW,BH*0.2,GS.hp,100,'#3ecf5a','#f2d024','#e01b1b','HP');
+  hpBar(barX,barY+BH*0.26,barsW,BH*0.15,GS.ar,100,'#57a8ff','#57a8ff','#57a8ff','AR');
+
+  /* --- weapon slots: fixed slots, hugging the right edge --- */
+  var sw=50*S,shh=BH*0.68,gap=5*S,sx=barX-sw*5-gap*4-16*S;
+  for(i=4;i>=0;i--){
+    var sel=(GS.wp===i),d=WDEF[i],ax=sx+(4-i)*(sw+gap);
+    rect(ax,BH*0.16,sw,shh,sel?'#ff8a1e':'rgba(255,255,255,0.05)',sel?'#ffd9a8':'#43474d',1);
+    var lab=(d.name==='SHOTGUN'?'SHOT':(d.name==='PISTOL'?'PIST':(d.name==='ROCKET'?'RKTL':d.name)));
+    tx(lab,ax+sw*0.5,BH*0.16+shh*0.34,sel?'#141414':'#9aa0a6',shh*0.30,900,FB,'center',0);
+    var am=d.melee?'--':''+(GS.ammo[i]|0);
+    tx(am,ax+sw*0.5,BH*0.16+shh*0.72,sel?'#141414':(((GS.ammo[i]|0)>0)?'#e8e8e8':'#5c6167'),
+       shh*0.27,700,MONO,'center',0);
+  }
+
+  /* --- mission line under the strip --- */
+  var my=BH+Math.max(16,18*S);
+  if(GS.mission){
+    var m=GS.mission,left=m.lim-m.t,s=m.name;
+    if(m.need>1)s+='  '+m.got+'/'+m.need;
+    if(m.kind==='cash'&&m.stage===0)s+='  ENVELOPES '+(m.need-m.got);
+    tx(s,UI.w*0.5,my,'#ffffff',Math.max(15,20*S),900,FB,'center');
+    tx(mmss(left),UI.w*0.5,my+Math.max(15,19*S),
+       (left<15&&blink(2))?'#ff4d4d':(left<30?'#f2d024':'#c9c9c9'),
+       Math.max(13,17*S),900,FB,'center');
+  }else if(GS.done.length>=MISSION_N){
+    tx('ALL JOBS DONE -- FINISH THE CITY',UI.w*0.5,my,'#ffd23f',Math.max(14,18*S),900,FB,'center');
+  }
+
+  /* --- say() banner --- */
+  if(GS.msgT>0&&GS.msg){
+    OX.globalAlpha=Math.min(1,GS.msgT/0.4);
+    tx(GS.msg,UI.w*0.5,UI.h-Math.max(64,74*S),'#ffffff',Math.max(14,19*S),700,FN,'center');
+    OX.globalAlpha=1;
+  }
+  if(GS.brief&&GS.briefT>0&&!GS.mission)drawBrief(S,UI.w,UI.h);
+  if(GS.bigT>0&&GS.big)bigDraw();
+  if(GS.mode==='dead'){
+    OX.fillStyle='rgba(70,0,0,'+(0.20+0.10*Math.sin(GS.clock*3)).toFixed(3)+')';
+    OX.fillRect(0,0,UI.w,UI.h);
+    if(GS.lives>0)tx('PRESS ENTER TO CONTINUE',UI.w*0.5,UI.h*0.62,'#e8e8e8',
+      Math.max(13,17*S),700,FN,'center');
+  }
+}
+function bigDraw(){
+  OX.globalAlpha=Math.min(1,GS.bigT/0.5);
+  var y=UI.h*(GS.mode==='dead'?0.42:0.33);
+  tx(GS.big,UI.w*0.5,y,'#e01b1b',Math.max(34,UI.h*0.085),900,FB,'center','#3d0505');
+  if(GS.sub)tx(GS.sub,UI.w*0.5,y+Math.max(30,UI.h*0.062),'#ffffff',
+    Math.max(14,UI.h*0.026),900,FB,'center');
+  OX.globalAlpha=1;
+}
+/* openBrief() counts GS.briefT down and missionStep() fires beginMission() when
+   it hits 0, so this panel is a curtain with a fuse, not an accept/decline
+   dialog. ENTER burns the fuse early (see uiStep). */
+function drawBrief(S,W,H){
+  var pw=Math.min(W*0.72,680*S),ph=Math.max(120,H*0.30);
+  var px0=(W-pw)*0.5,py0=H*0.30;
+  rect(px0,py0,pw,ph,'rgba(6,7,9,0.80)');
+  rect(px0,py0,pw,3,'#e01b1b');
+  tx('MISSION BRIEFING',px0+pw*0.5,py0+ph*0.16,'#e01b1b',Math.max(16,22*S),900,FB,'center');
+  hf(Math.max(13,17*S),700,FN);
+  var L=wrap(GS.brief,pw-40*S),i;
+  for(i=0;i<L.length&&i<5;i++)
+    tx(L[i],px0+pw*0.5,py0+ph*0.36+i*Math.max(15,19*S),'#e8e8e8',Math.max(13,17*S),700,FN,'center',0);
+  var f=clamp(GS.briefT/7,0,1);
+  rect(px0+20,py0+ph-16*S,pw-40,6*S,'rgba(255,255,255,0.14)');
+  OX.fillStyle='#ff8a1e';OX.fillRect(px0+20,py0+ph-16*S,(pw-40)*f,6*S);
+  tx(mmss(GS.briefT)+' TO START -- ENTER NOW',px0+pw*0.5,py0+ph-30*S,
+     blink(1.6)?'#ffffff':'#9aa0a6',Math.max(11,13*S),700,FN,'center',0);
+}
+
+/* ------------------------------------------------------------ map screen */
+function mapFit(){
+  var mg=Math.round(UI.w*0.03),top=Math.round(UI.h*0.13),bot=Math.round(UI.h*0.14);
+  var ww=CFG.WX-CFG.R0,wz=CFG.WZ-CFG.R0;
+  MAPK=Math.min((UI.w-mg*2)/ww,(UI.h-top-bot)/wz);
+  MAPX=mg+(UI.w-mg*2-ww*MAPK)*0.5-CFG.R0*MAPK;
+  MAPZ=top+(UI.h-top-bot-wz*MAPK)*0.5-CFG.R0*MAPK;
+}
+function mapX(x){return MAPX+x*MAPK;}
+function mapZ(z){return MAPZ+z*MAPK;}
+/* The map is a 2D projection of the same CFG lattice, CITY.kind grid and live
+   actor state the 3D city is built from, so it cannot drift out of step with
+   the geometry it stands for. Park/water come from the tile-kind grid, not from
+   PARKBOX -- those boxes are parked-car collision AABBs, not parkland. */
+function drawMap(){
+  var S=hudScale(),W=UI.w,H=UI.h,i,j;
+  OX.fillStyle='#05070a';OX.fillRect(0,0,W,H);
+  tx('CITY MAP',20*S,H*0.062,'#e01b1b',Math.max(20,34*S),900,FB,'left');
+  tx(TH.name+'  '+TH.chapter,W-20*S,H*0.062,'#d8d8d8',Math.max(13,20*S),900,FB,'right');
+  mapFit();
+  var w0=mapX(CFG.R0),w1=mapX(CFG.WX),z0=mapZ(CFG.R0),z1=mapZ(CFG.WZ);
+  OX.save();
+  OX.beginPath();OX.rect(w0,z0,w1-w0,z1-z0);OX.clip();
+  OX.fillStyle=css(TH.ground);OX.fillRect(w0,z0,w1-w0,z1-z0);
+  for(j=0;j<CFG.NZ;j++)for(i=0;i<CFG.NX;i++){
+    var k=kindAt(i,j);
+    if(k!=='park'&&k!=='water')continue;
+    var bx0=mapX(i*CFG.STRIDE+CFG.R1),bx1=mapX(CFG.MAX(i)-CFG.R1);
+    var bz0=mapZ(j*CFG.STRIDE+CFG.R1),bz1=mapZ(CFG.MAX(j)-CFG.R1);
+    OX.fillStyle=(k==='water')?'#1d3a52':'#2b4a2c';
+    OX.fillRect(bx0,bz0,bx1-bx0,bz1-bz0);
+  }
+  OX.fillStyle='rgba(30,33,38,0.95)';
+  for(i=0;i<=CFG.NX;i++)OX.fillRect(mapX(i*CFG.STRIDE-CFG.ROAD*0.5),z0,CFG.ROAD*MAPK,z1-z0);
+  for(j=0;j<=CFG.NZ;j++)OX.fillRect(w0,mapZ(j*CFG.STRIDE-CFG.ROAD*0.5),w1-w0,CFG.ROAD*MAPK);
+  var tgt=mapTarget();
+  if(tgt){
+    OX.strokeStyle='rgba(255,138,30,0.75)';OX.lineWidth=Math.max(1,1.6*S);
+    OX.setLineDash([6*S,5*S]);
+    OX.beginPath();OX.moveTo(mapX(P.x),mapZ(P.z));OX.lineTo(mapX(tgt[0]),mapZ(tgt[1]));OX.stroke();
+    OX.setLineDash([]);
+    light(mapX(tgt[0]),mapZ(tgt[1]),Math.max(4,7*S)*(blink(2)?1.25:1),'#ff8a1e');
+  }
+  for(i=0;i<PHONES.length;i++){
+    var ph=PHONES[i];if(!ph.on)continue;
+    OX.fillStyle='#ffd23f';OX.fillRect(mapX(ph.x)-2.5*S,mapZ(ph.z)-2.5*S,5*S,5*S);
+  }
+  OX.fillStyle='rgba(226,232,238,0.75)';
+  for(i=0;i<PED.length;i++){
+    var q=PED[i].userData;if(!q.alive)continue;
+    OX.fillRect(mapX(q.x)-0.8,mapZ(q.z)-0.8,1.8,1.8);
+  }
+  for(i=0;i<VEH.length;i++){
+    var u=VEH[i].userData;if(!u.alive)continue;
+    if(u.role==='police')OX.fillStyle=blink(4)?'#5fb4ff':'#16324f';
+    else if(u.role==='player')OX.fillStyle='#ffffff';
+    else if(u.state==='wreck')OX.fillStyle='#5d3316';
+    else OX.fillStyle='#949ba4';
+    var r=(u.role==='police'||u.role==='player')?2.6*S:1.9*S;
+    OX.fillRect(mapX(u.x)-r,mapZ(u.z)-r,r*2,r*2);
+  }
+  OX.save();
+  OX.translate(mapX(P.x),mapZ(P.z));OX.rotate(P.a);
+  OX.beginPath();OX.moveTo(7.5*S,0);OX.lineTo(-5*S,4.6*S);OX.lineTo(-5*S,-4.6*S);OX.closePath();
+  OX.fillStyle='#ffffff';OX.fill();
+  OX.strokeStyle='#0b0b0b';OX.lineWidth=1;OX.stroke();
+  OX.restore();
+  OX.restore();
+  rect(w0,z0,w1-w0,z1-z0,null,'rgba(255,255,255,0.35)',1);
+  mapLegend(S);
+}
+/* Same target the arrow in the 3D world is pointing at, or the nearest job. */
+function mapTarget(){
+  var m=GS.mission,e,t,best,bd,i;
+  if(m){
+    if(m.kind==='cash'){
+      if(m.stage===0){e=nearestEnvelope();return e?[e.x,e.z]:[m.tx,m.tz];}
+      return [m.ox,m.oz];
+    }
+    if(m.kind==='kill'||m.kind==='wreck'){
+      t=nearestTarget(m.kind==='kill'?'ped':'veh');
+      return t?[t.x,t.z]:[m.tx,m.tz];
+    }
+    return [m.tx,m.tz];
+  }
+  e=nearestEnvelope();
+  if(e)return [e.x,e.z];
+  best=null;bd=1e9;
+  for(i=0;i<PHONES.length;i++){
+    var p=PHONES[i];if(!p.on)continue;
+    var d=dist2(p.x,p.z,P.x,P.z);
+    if(d<bd){bd=d;best=p;}
+  }
+  return best?[best.x,best.z]:null;
+}
+function mapLegend(S){
+  var y=UI.h-Math.max(26,30*S),x=Math.round(UI.w*0.03),i;
+  var items=[['#ffffff','YOU'],['#ff8a1e','JOB'],['#ffd23f','PHONE'],
+             ['#5fb4ff','POLICE'],['#949ba4','CROWD'],['#5d3316','WRECK']];
+  for(i=0;i<items.length;i++){
+    var bx=x+i*Math.max(84,98*S);
+    OX.fillStyle=items[i][0];OX.fillRect(bx,y,7*S,7*S);
+    tx(items[i][1],bx+11*S,y+3.5*S,'#9aa0a6',Math.max(10,12*S),700,FN,'left',0);
+  }
+  tx('M / ENTER -- CLOSE MAP',UI.w-Math.round(UI.w*0.03),y+3.5*S,'#ffffff',
+     Math.max(11,13*S),700,FN,'right',0);
+}
+
+/* -------------------------------------------------------------- screens */
+function scrim(a){OX.fillStyle='rgba(2,3,5,'+a.toFixed(3)+')';OX.fillRect(0,0,UI.w,UI.h);}
+function drawTitle(){
+  var S=hudScale(),W=UI.w,H=UI.h,th=THEMES[HUDC.sel];
+  scrim(0.62);
+  var lg=Math.max(64,H*0.19);
+  tx('GTA',W*0.5,H*0.30,'#e01b1b',lg,900,FB,'center','#5d0808');
+  tx('G R A N D   T H E F T   A U T O',W*0.5,H*0.30+lg*0.55,'#c9c9c9',
+     Math.max(11,H*0.020),700,MONO,'center');
+  rect(W*0.5-Math.min(W*0.26,300*S),H*0.44,Math.min(W*0.52,600*S),2,'rgba(224,27,27,0.8)');
+  tx(th.name,W*0.5,H*0.52,'#ffffff',Math.max(22,H*0.052),900,FB,'center');
+  tx(th.chapter+'   '+th.sub,W*0.5,H*0.575,'#9aa0a6',Math.max(11,H*0.019),700,MONO,'center');
+  if(HUDC.unlocked>1)tx('< >   CHANGE CITY',W*0.5,H*0.625,'#ffd23f',Math.max(12,H*0.022),900,FB,'center');
+  if(blink(1.4))tx('PRESS ENTER',W*0.5,H*0.705,'#ffffff',Math.max(16,H*0.036),900,FB,'center');
+  if(HUDC.hi>0)tx('HI-SCORE '+HUDC.hi,W*0.5,H*0.762,'#8b8b8b',Math.max(11,H*0.019),700,FN,'center');
+  tx('WASD MOVE   SHIFT RUN   SPACE BRAKE   CTRL/J FIRE   F/E ENTER-EXIT CAR',
+     W*0.5,H*0.87,'#6f757b',Math.max(10,H*0.0165),700,FN,'center',0);
+  tx('1-5 WEAPONS   M MAP   P PAUSE   L MUTE   H HORN',
+     W*0.5,H*0.905,'#6f757b',Math.max(10,H*0.0165),700,FN,'center',0);
+  if(GS.msgT>0&&GS.msg)tx(GS.msg,W*0.5,H*0.81,'#ffffff',Math.max(12,16*S),700,FN,'center');
+}
+function drawPause(){
+  var S=hudScale();
+  scrim(0.66);
+  tx('PAUSED',UI.w*0.5,UI.h*0.40,'#e01b1b',Math.max(30,UI.h*0.075),900,FB,'center','#3d0505');
+  tx(TH.name+'   SCORE '+(GS.score|0)+'   $'+(GS.cash|0),UI.w*0.5,UI.h*0.475,'#d8d8d8',
+     Math.max(12,16*S),700,FN,'center');
+  if(blink(1.6))tx('P / ENTER RESUME   M MAP',UI.w*0.5,UI.h*0.56,'#ffffff',
+     Math.max(12,16*S),900,FB,'center');
+  tx('CITY JOBS '+GS.done.length+'/'+MISSION_N,UI.w*0.5,UI.h*0.615,'#8b8b8b',
+     Math.max(11,14*S),700,FN,'center');
+}
+function drawOver(){
+  var S=hudScale(),fin=(GS.city+1>=THEMES.length&&GS.done.length>=MISSION_N);
+  scrim(0.80);
+  tx('GAME OVER',UI.w*0.5,UI.h*0.34,'#e01b1b',Math.max(34,UI.h*0.09),900,FB,'center','#3d0505');
+  tx(TH.name+'  '+TH.chapter,UI.w*0.5,UI.h*0.41,'#9aa0a6',Math.max(12,16*S),700,FN,'center');
+  tx('FINAL SCORE  '+(GS.score|0),UI.w*0.5,UI.h*0.50,'#ffffff',Math.max(20,UI.h*0.048),900,FB,'center');
+  tx('CASH BANKED $'+(GS.cash|0)+'   BONUS '+(GS.bonus|0)+'   JOBS '+GS.done.length+'/'+MISSION_N,
+     UI.w*0.5,UI.h*0.56,'#c9c9c9',Math.max(11,15*S),700,FN,'center');
+  if(GS.newHi){if(blink(2))tx('NEW HI-SCORE',UI.w*0.5,UI.h*0.625,'#ffd23f',Math.max(16,22*S),900,FB,'center');}
+  else tx('HI-SCORE '+HUDC.hi,UI.w*0.5,UI.h*0.625,'#8b8b8b',Math.max(12,15*S),700,FN,'center');
+  if(fin)tx('YOU CLEARED ALL THREE CITIES',UI.w*0.5,UI.h*0.685,'#ff8a1e',
+     Math.max(14,19*S),900,FB,'center');
+  if(GS.modeT>0.6&&blink(1.4))tx('PRESS ENTER',UI.w*0.5,UI.h*0.76,'#ffffff',
+     Math.max(14,18*S),900,FB,'center');
+}
+function drawComplete(){
+  var S=hudScale(),last=(GS.city+1>=THEMES.length);
+  scrim(0.74);
+  tx('CITY COMPLETE',UI.w*0.5,UI.h*0.33,'#ffd23f',Math.max(30,UI.h*0.082),900,FB,'center','#4a3400');
+  tx(TH.name+'  '+TH.chapter,UI.w*0.5,UI.h*0.405,'#d8d8d8',Math.max(12,16*S),700,FN,'center');
+  tx('SCORE '+(GS.score|0)+'   THIS CITY '+GS.cityScore,
+     UI.w*0.5,UI.h*0.49,'#ffffff',Math.max(16,22*S),900,FB,'center');
+  tx('CASH $'+(GS.cash|0)+'   BONUS '+(GS.bonus|0)+'   JOBS '+MISSION_N+'/'+MISSION_N,
+     UI.w*0.5,UI.h*0.55,'#9aa0a6',Math.max(11,15*S),700,FN,'center');
+  tx(GS.wrecks+' WRECKS   '+GS.kills+' BODY COUNT   '+GS.runOver+' RUN-OVERS',
+     UI.w*0.5,UI.h*0.60,'#9aa0a6',Math.max(11,15*S),700,FN,'center');
+  if(GS.modeT>0.6&&blink(1.4))
+    tx(last?'PRESS ENTER FOR THE FINAL TALLY':'PRESS ENTER FOR '+THEMES[GS.city+1].name,
+       UI.w*0.5,UI.h*0.69,'#ffffff',Math.max(14,19*S),900,FB,'center');
+}
+
+/* --------------------------------------------------- state transitions */
+/* clearActors() already drops FX, bullets, markers and pickups with it. */
+function rebuildCity(ti){
+  clearActors();
+  buildCity(ti);
+  var p0=roadSnap(CFG.WX*0.5,CFG.WZ*0.5);
+  spawnPlayer(p0.x,p0.z,headingOf(p0));
+  populateCity();
+  C4C.pol=0;C4C.sir=0;C4C.die=0;C4C.bust=0;C4C.job=1.2;C4C.fail=0;C4C.ph=0;
+  C4C.kt=0;C4C.t=0;
+  GS.deadT=0;GS.camShake=0;
+  CAM.x=P.x;CAM.z=P.z;
+}
+function newGame(ti){
+  ti=clamp(ti|0,0,HUDC.unlocked-1);
+  HUDC.sel=ti;GS.city=ti;
+  GS.score=0;GS.cash=0;GS.lives=3;GS.done=[];
+  GS.kills=0;GS.wrecks=0;GS.runOver=0;
+  GS.hp=100;GS.ar=0;GS.wanted=0;GS.heat=0;GS.coolT=0;GS.starT=0;
+  GS.wp=0;GS.ammo=[0,0,0,0,0];
+  GS.mission=null;GS.brief=null;GS.briefT=0;GS.missionIdx=0;
+  GS.msg='';GS.msgT=0;GS.big='';GS.bigT=0;GS.sub='';
+  GS.fade=1;GS.modeT=0;GS.deadT=0;GS.bonus=0;GS.newHi=0;GS.camShake=0;
+  rebuildCity(ti);
+  /* GS.cityScore is the per-city reward tally that winMission() accumulates into,
+     so it resets with the city; GS.score stays the cumulative attract-mode score. */
+  GS.mode='play';GS.cityScore=0;
+  bigMsg(TH.name,TH.chapter+' -- '+TH.sub);
+  say('STEAL A CAR. STAY OUT OF JAIL.',4.2);
+  SND.menu();
+}
+function selectCity(d){
+  if(HUDC.unlocked<2)return;
+  var n=(HUDC.sel+d+THEMES.length)%THEMES.length;
+  if(n>=HUDC.unlocked||n===HUDC.sel)return;
+  HUDC.sel=n;SND.menu();
+  rebuildCity(n);
+}
+function cityCleared(){
+  GS.mission=null;GS.brief=null;GS.briefT=0;
+  GS.bonus=5000+(GS.lives|0)*1000;
+  GS.score+=GS.bonus;
+  HUDC.unlocked=Math.max(HUDC.unlocked,Math.min(THEMES.length,GS.city+2));
+  if(GS.score>HUDC.hi){HUDC.hi=GS.score;GS.newHi=1;}
+  GS.mode='complete';GS.modeT=0;GS.fade=1;
+  bigMsg('CITY COMPLETE',TH.name+' -- BONUS '+GS.bonus);
+  SND.complete();
+}
+function advanceCity(){
+  if(GS.city+1>=THEMES.length){gameOver();return;}
+  GS.city++;HUDC.sel=GS.city;GS.done=[];
+  GS.fade=1;GS.modeT=0;
+  rebuildCity(GS.city);
+  /* Same invariant as newGame(): cityScore is the per-city reward tally that
+     winMission() accumulates into. Seeding it from GS.score would make the
+     'THIS CITY' readout print the whole run's cumulative score. */
+  GS.mode='play';GS.cityScore=0;
+  bigMsg(TH.name,TH.chapter+' -- '+TH.sub);
+}
+function gameOver(){
+  if(GS.mode==='over')return;
+  GS.mission=null;GS.brief=null;GS.briefT=0;
+  GS.bonus=(GS.lives|0)*1000;
+  GS.score+=GS.bonus;
+  if(GS.score>HUDC.hi){HUDC.hi=GS.score;GS.newHi=1;}
+  GS.mode='over';GS.modeT=0;GS.fade=1;
+  bigMsg('GAME OVER','FINAL SCORE '+(GS.score|0));
+  SND.fail();
+}
+function toTitle(){
+  HUDC.sel=GS.city;
+  GS.mission=null;GS.brief=null;GS.briefT=0;
+  GS.mode='title';GS.modeT=0;GS.fade=1;
+  rebuildCity(GS.city);
+}
+
+/* ------------------------------------------------ mode machine, once per frame */
+function uiStep(dt){
+  if(GS.msgT>0)GS.msgT=Math.max(0,GS.msgT-dt);
+  if(GS.bigT>0)GS.bigT=Math.max(0,GS.bigT-dt);
+  if(GS.fade>0)GS.fade=Math.max(0,GS.fade-dt*1.7);
+  GS.modeT+=dt;
+  var m=GS.mode;
+  if(jp('mute')){SND.setMute(!SND.isMute());say(SND.isMute()?'SOUND OFF':'SOUND ON',1.4);}
+  if(jp('horn')&&m==='play')SND.horn();
+  if(m==='title'){
+    if(jp('start')||jp('fire')||jp('act')){newGame(HUDC.sel);return;}
+    if(jp('right')||jp('down')){selectCity(1);return;}
+    if(jp('left')||jp('up')){selectCity(-1);return;}
+    return;
+  }
+  if(m==='play'){
+    if(jp('map')){GS.mode='map';GS.modeT=0;SND.menu();return;}
+    if(jp('pause')){GS.mode='pause';GS.modeT=0;SND.menu();return;}
+    if(GS.brief&&GS.briefT>0&&!GS.mission){
+      if(jp('start')||jp('act')){beginMission(GS.missionIdx|0);return;}
+      return;
+    }
+    if(!GS.mission&&!GS.brief&&GS.done.length>=MISSION_N){cityCleared();return;}
+    return;
+  }
+  if(m==='map'){
+    if(jp('map')||jp('start')||jp('back')||jp('pause')){GS.mode='play';GS.modeT=0;}
+    return;
+  }
+  if(m==='pause'){
+    if(jp('pause')||jp('start')||jp('back')||jp('map')){GS.mode='play';GS.modeT=0;}
+    return;
+  }
+  if(m==='dead'){
+    /* chunk 4c holds the corpse down for C4C.die; ENTER skips the wait. The
+       zero-life branch lives in missionStep, because that is where respawn is. */
+    if(jp('start')&&GS.lives>0)C4C.die=Math.min(C4C.die,0.2);
+    return;
+  }
+  if(m==='complete'){
+    if(GS.modeT>0.8&&(jp('start')||jp('fire')||jp('act')||jp('map')))advanceCity();
+    return;
+  }
+  if(m==='over'){
+    if(GS.modeT>0.8&&(jp('start')||jp('map')||jp('back')||jp('fire')))toTitle();
+    return;
+  }
+}
+
+/* ------------------------------------------------------------- per frame */
+function drawFrame(){
+  if(!OX)return;
+  OX.save();
+  OX.clearRect(0,0,UI.w,UI.h);
+  var m=GS.mode;
+  if(m==='title')drawTitle();
+  else if(m==='map')drawMap();
+  else if(m==='over')drawOver();
+  else if(m==='complete')drawComplete();
+  else{drawHUD();if(m==='pause')drawPause();}
+  if(GS.fade>0.002){
+    OX.fillStyle='rgba(0,0,0,'+GS.fade.toFixed(3)+')';
+    OX.fillRect(0,0,UI.w,UI.h);
+  }
+  OX.restore();
+}
+/* attract mode: a slow low orbit over the city the player is about to get */
+function titleCam(dt){
+  var t=GS.clock*0.045;
+  var fx=CFG.WX*(0.32+0.30*(0.5+0.5*Math.sin(t*0.7)));
+  var fz=CFG.WZ*(0.36+0.28*(0.5+0.5*Math.cos(t*0.55)));
+  var r=Math.min(CFG.WX,CFG.WZ)*0.30;
+  camera.position.set(fx+Math.cos(t)*r,58+10*Math.sin(t*0.9),fz+Math.sin(t*1.1)*r);
+  camera.lookAt(fx,12,fz);
+}
+var RAF=0,lastTS=0,fpsA=0,fpsN=0;
+function tick(dt){
+  if(dt<0)dt=0;
+  if(dt>0.05)dt=0.05;      /* one long frame must never become one huge physics step */
+  GS.t+=dt;GS.clock+=dt;
+  fpsA+=dt;fpsN++;
+  if(fpsA>=0.5){GS.fps=Math.round(fpsN/fpsA);fpsA=0;fpsN=0;}
+  uiStep(dt);
+  /* title simulates so attract-mode traffic lives; map/pause/over/complete do
+     not, which is the point of the gate -- footMove/driveInput read raw keys,
+     so an ungated step would move the actor on the title card. */
+  if(GS.mode==='play'||GS.mode==='dead'||GS.mode==='title')stepWorld(dt);
+  if(GS.mode==='title')titleCam(dt);
+  drawFrame();
+  if(renderer)renderer.render(scene,camera);
+  endFrame();
+}
+function frame(ts){
+  RAF=requestAnimationFrame(frame);
+  if(!lastTS)lastTS=ts;
+  var dt=(ts-lastTS)/1000;lastTS=ts;
+  tick(dt);
+}
+addEventListener('pointerdown',function(){
+  SND.resume();
+  if(GS.mode==='title')newGame(HUDC.sel);
+  else if(GS.mode==='over'&&GS.modeT>0.8)toTitle();
+  else if(GS.mode==='complete'&&GS.modeT>0.8)advanceCity();
+  else if(GS.mode==='pause'||GS.mode==='map'){GS.mode='play';GS.modeT=0;}
+});
+
+/* ----------------------------------------------------------------- boot */
+/* Yielded in six paint-visible stages: buildCity() alone is ~2 s of geometry,
+   so one blocking pass would look like a hung page. nextPaint lets the splash
+   actually repaint between stages. */
+function nextPaint(fn){requestAnimationFrame(function(){setTimeout(fn,0);});}
+function boot(){
+  var stages=[
+    ['STARTING RENDERER',function(){
+      initGL();
+      if(!renderer||!renderer.getContext())throw new Error('WebGL context unavailable');
+    }],
+    ['BUILDING '+THEMES[0].name,function(){buildCity(0);}],
+    ['SPECIAL EFFECTS',function(){initFX();}],
+    ['SPAWNING PLAYER',function(){
+      var p0=roadSnap(CFG.WX*0.5,CFG.WZ*0.5);
+      spawnPlayer(p0.x,p0.z,headingOf(p0));
+    }],
+    ['TRAFFIC AND CROWDS',function(){populateCity();}],
+    ['READY',function(){
+      HUDC.sel=0;HUDC.unlocked=1;
+      GS.mode='title';GS.modeT=0;GS.fade=1;
+      bootEl.style.display='none';
+      lastTS=0;
+      if(!RAF)RAF=requestAnimationFrame(frame);
+    }]
+  ];
+  var i=0;
+  function run(){
+    if(i>=stages.length)return;
+    var st=stages[i++];
+    bootStep(i/(stages.length+1),st[0]);
+    nextPaint(function(){
+      try{st[1]();}
+      catch(e){bootFail(st[0]+' failed:\n'+(e.message||e));return;}
+      run();
+    });
+  }
+  run();
+}
+/* The headless harness drives tick()/uiStep() itself and must not also have a
+   rAF loop racing it, so boot() stays opt-out for tests. */
+if(!window.__GTA_TEST__)boot();
 })();
 </script>
 </body>

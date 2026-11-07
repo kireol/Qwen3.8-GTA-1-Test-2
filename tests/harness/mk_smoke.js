@@ -4,12 +4,18 @@ let s=fs.readFileSync(SRC,'utf8');
 const CDN='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
 if(s.indexOf(CDN)<0)throw new Error('CDN tag not found');
 s=s.replace(CDN,'three128.js');
+/* Chunk 5 ends with `if(!window.__GTA_TEST__)boot();`. Without this flag boot()
+   would build the city on rAF ticks and race the driver's own initGL/buildCity. */
+s=s.replace('<script src="three128.js"></script>',
+            '<script src="three128.js"></script>\n<script>window.__GTA_TEST__=1;</script>');
 const TAIL='\n})();\n</script>';
 if(s.split(TAIL).length-1!==1)throw new Error('tail anchor not unique');
 
 const driver=String.raw`
 /* ------------------------------------------------------- smoke driver */
-var UI={w:1280,h:720};/* game-scope: onResize() writes UI.w/UI.h */
+/* Chunk 5 owns UI at game scope (var UI={w:1280,h:720}) and initGL() below runs
+   onResize(), which overwrites UI.w/UI.h with the real window size. A second
+   declaration here would only shadow the game's object behind its back. */
 (function(){
 var H={log:[],missing:{},frames:0,errs:0,stepErrs:0,rendErrs:0,stop:false};
 window.__H=H;
@@ -799,6 +805,244 @@ try{
       bad:actorScan(),fx:fxRep()};
     GS.mission=null;GS.brief=null;GS.briefT=0;C4C.job=0;GS.mode='play';GS.wanted=0;GS.heat=0;
     clearEnvelopeFlags();markersClear();
+  })();
+  /* ================= chunk 5: shipped main loop, HUD paint, mode machine =========
+     Chunk 5 owns the first rAF loop the file ever had -- before it the driver WAS
+     the main loop. So these scenarios call tick(), the real frame body (uiStep +
+     gated stepWorld + drawFrame + render + endFrame), never stepWorld directly.
+     Every scenario has its own try/catch: a broken one must still leave R.audit2
+     and R.per to be written. */
+  (function(){
+    var C={};
+    /* Proof that a screen really painted. getImageData is transform-free and
+       always reads DEVICE pixels while drawFrame works in CSS px under the DPR
+       transform onResize installs; headless Chrome runs at dpr 1, where the two
+       spaces coincide. Sample every 7th device row, every 16th device column. */
+    function ink(){
+      try{
+        var d=OX.getImageData(0,0,OV.width,OV.height).data;
+        var n=0,y,x,b;
+        for(y=0;y<OV.height;y+=7){
+          b=y*OV.width*4;
+          for(x=0;x<OV.width;x+=16)if(d[b+x*4+3]>8)n++;
+        }
+        return n;
+      }catch(e){return 'ink-fail:'+(e.message||e);}
+    }
+    function samples(){
+      var n=0,y;
+      for(y=0;y<OV.height;y+=7)n+=Math.ceil(OV.width/16);
+      return n;
+    }
+    /* One shipped frame. Keys are HELD (KEY) only, never just-pressed (JP): with
+       no edge, uiStep cannot fire newGame/selectCity/advanceCity out of a paint. */
+    function fr(n,keys){
+      for(var i=0;i<n;i++){
+        if(H.stop)return;
+        for(var q in KEY)KEY[q]=0;
+        if(keys)for(var k in keys)if(keys[k])KEY[k]=1;
+        H.frames++;trapNew();
+        try{tick(1/60);}
+        catch(e){H.stepErrs++;if(!stubMissing(e.message))elog('TICK',e);
+                 if(H.stepErrs>20)H.stop=true;}
+      }
+      for(var q2 in KEY)KEY[q2]=0;
+    }
+    /* Neutral staging. C4C.die>0 is not decoration: killPlayer() returns early on
+       it, so the player cannot die and leave the mode under test, and missionStep
+       cannot respawn him out of 'dead' into 'play' on frame 1 -- which would make
+       a correct input gate look like a broken one. GS.fade must be 0 or ink()
+       would measure the black wipe, not the HUD underneath it. */
+    function stage(mode){
+      C4C.die=9;GS.hp=100;GS.wanted=0;GS.heat=0;
+      GS.mode=mode;GS.modeT=0;GS.fade=0;
+    }
+    function paint(mode){stage(mode);fr(2,null);return ink();}
+    var MODES=['play','title','map','pause','dead','over','complete'];
+    /* All axes held at once: gx/gz cancel inside footMove, so this scenario
+       cannot walk the player out of the world box while still leaving every raw
+       key reader live for the gate to count. */
+    var ALLK={up:1,down:1,left:1,right:1,run:1,fire:1,act:1,brake:1};
+
+    /* --- 1. the input gate. footMove/driveInput read RAW keys (kd, not jp), so
+       before the chunk-5 gate a title card or pause screen could steer the
+       actor. Wrapping the bindings is the same trick R.enterTrace uses, and the
+       counter is its own positive control: a rejected patch throws here. --- */
+    var oFoot=footMove,oDrive=driveInput,nFoot=0,nDrive=0;
+    try{
+      footMove=function(){nFoot++;return oFoot.apply(this,arguments);};
+      driveInput=function(){nDrive++;return oDrive.apply(this,arguments);};
+      C.gate={patched:'ok'};
+      if(P.mode!=='foot')tp(cx(),cz(),P.a);
+      for(var i1=0;i1<MODES.length;i1++){
+        stage(MODES[i1]);nFoot=0;nDrive=0;
+        fr(30,ALLK);
+        C.gate[MODES[i1]]={foot:nFoot,drive:nDrive,mode:GS.mode};
+      }
+      /* driveInput is the other raw reader, so the gate has to hold for the
+       * throttle as well as the legs -- and boarding needs mode 'play', since
+       * tryEnterVehicle is only reachable through footMove. */
+      stage('play');C4C.die=0;
+      var br=boardIsolated(85);
+      C.gate.board=br?(br.car||br.err||'?'):'none';
+      if(P.mode==='veh'){
+        for(var i2=0;i2<MODES.length;i2++){
+          stage(MODES[i2]);nFoot=0;nDrive=0;
+          fr(30,ALLK);
+          C.gate['veh_'+MODES[i2]]={foot:nFoot,drive:nDrive,mode:GS.mode};
+        }
+      }
+      var bad1=[];
+      for(var i3=0;i3<MODES.length;i3++){
+        var mo=MODES[i3],g0=C.gate[mo],g1=C.gate['veh_'+mo];
+        if(mo==='play'){
+          if(!g0.foot)bad1.push('onfoot-play:0');
+          if(g1&&!g1.drive)bad1.push('inveh-play:0');
+        }else{
+          if(g0.foot)bad1.push(mo+':foot'+g0.foot);
+          if(g1&&g1.drive)bad1.push(mo+':drive'+g1.drive);
+        }
+      }
+      C.gateBad=bad1;
+    }catch(e){C.gateErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+    footMove=oFoot;driveInput=oDrive;
+    if(P.mode==='veh'){JP.act=1;step(40,null);}/* unboard via the game's own F/E */
+    stage('play');C4C.die=0;
+
+    /* --- 2. per-screen paint. ink() counts non-transparent overlay pixels the
+       HUD actually put there: drawFrame clears the canvas first, so anything
+       measured is chunk-5 output and nothing else. samples() is the denominator
+       (1280x720 -> 8343), so map/over should saturate and the play HUD should
+       not, because it only owns the top strip plus the bars. --- */
+    try{
+      var sc={},mi4;
+      GS.mission=null;GS.brief=null;GS.briefT=0;GS.done=[];GS.lives=3;
+      for(mi4=0;mi4<MODES.length;mi4++)sc[MODES[mi4]]=paint(MODES[mi4]);
+      /* The brief curtain is a drawHUD branch, not a mode: play + brief text and
+         no live mission is the only state in which it paints. */
+      GS.brief='DELIVER THE PARCELS. DO NOT BE SEEN.';GS.briefT=6.9;
+      stage('play');fr(2,null);sc.brief=ink();
+      GS.brief=null;GS.briefT=0;
+      /* The say() banner is another drawHUD branch. */
+      say('BANNER TEST',2.6);stage('play');fr(2,null);sc.banner=ink();
+      GS.msgT=0;GS.msg='';
+      /* Death overlay: red wash, plus the continue prompt only while lives remain. */
+      GS.lives=0;sc.deadNoContinue=paint('dead');GS.lives=3;
+      var tot=samples(),fr2={};
+      for(mi4=0;mi4<MODES.length;mi4++)
+        fr2[MODES[mi4]]=Math.round(sc[MODES[mi4]]/tot*1000)/1000;
+      C.screens=sc;C.samples=tot;C.frac=fr2;
+      C.paintBad=(function(){var b=[],q;
+        for(q in sc)if(typeof sc[q]!=='number'||sc[q]<=0)b.push(q+'='+sc[q]);
+        return b;})();
+      stage('play');
+    }catch(e){C.screensErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+
+    /* --- 3. uiStep timer decay. say()/bigMsg() set these and nothing in chunks
+       1-4c ever lowered them, so the first banner stuck for the whole session. --- */
+    try{
+      GS.mission=null;GS.brief=null;GS.briefT=0;GS.done=[];
+      stage('play');GS.fade=1;say('DECAY',1.0);bigMsg('BIG','SUB');
+      GS.msgT=1;GS.bigT=1;
+      var mt0=GS.modeT;
+      uiStep(0.5);
+      C.decay={msgT:r1(GS.msgT),bigT:r1(GS.bigT),fade:r1(GS.fade),
+               modeT:r1(GS.modeT-mt0),mode:GS.mode};
+    }catch(e){C.decayErr=String(e.message||e);}
+
+    /* --- 4. city-cleared path, driven the way a player drives it: uiStep in
+       'play' with all six jobs done and no mission running. Must arm the next
+       city, because newGame() clamps its argument to HUDC.unlocked-1. --- */
+    try{
+      GS.mission=null;GS.brief=null;GS.briefT=0;GS.done=[];
+      stage('play');GS.score=1000;
+      var i5;for(i5=0;i5<MISSION_N;i5++)GS.done.push(i5);
+      var un0=HUDC.unlocked;
+      uiStep(1/60);
+      C.complete={mode:GS.mode,done:GS.done.length,bonus:GS.bonus,score:GS.score,
+                  unlocked:HUDC.unlocked,wasUnlocked:un0,hi:HUDC.hi,newHi:GS.newHi};
+      /* advanceCity() is the only other writer of GS.cityScore, and it used to
+         reseed it from the cumulative GS.score -- which is the very number
+         drawComplete labels 'THIS CITY'. It must reset like newGame() does.
+         This is also the completion path's only rebuild, so it proves
+         rebuildCity() survives a live 'complete' -> 'play' hand-off. */
+      var cs0=GS.cityScore,city0=GS.city;
+      advanceCity();
+      C.advance={mode:GS.mode,fromCity:city0,city:GS.city,th:TH.name,
+        chapter:TH.chapter,cityScore:GS.cityScore,wasCityScore:cs0,score:GS.score,
+        done:GS.done.length,unlocked:HUDC.unlocked,sel:HUDC.sel,
+        fade:r1(GS.fade),veh:VEH.length,ped:PED.length,phones:PHONES.length,
+        statics:staticMeshes.length,bad:actorScan()};
+    }catch(e){C.completeErr=String(e.message||e);}
+
+    /* --- 5. the real end-of-run path. respawnPlayer() never inspects GS.lives,
+       so the lives gate inside missionStep's dead branch is the ONLY thing that
+       can end a run; before chunk 5 the last life respawned forever. over2 is
+       the positive control: same frames, one life left, must respawn. --- */
+    try{
+      GS.mode='dead';GS.lives=0;C4C.die=0.01;GS.fade=0;
+      step(2,null);
+      C.over1={mode:GS.mode,lives:GS.lives,bonus:GS.bonus,score:GS.score,
+               hi:HUDC.hi,newHi:GS.newHi};
+      /* The control has to re-enter 'dead': gameOver() already moved the run out
+         of that mode, and the lives branch only runs inside missionStep's dead
+         handler -- leaving mode 'over' would measure nothing and look like a bug. */
+      GS.lives=2;GS.mode='dead';GS.fade=0;C4C.die=0.01;
+      step(2,null);
+      C.over2={mode:GS.mode,hp:GS.hp,lives:GS.lives,ammo:GS.ammo.join('/'),
+               invP:r1(P.inv),bad:actorScan()};
+    }catch(e){C.overErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+    stage('play');
+
+    /* --- 6. the def.brief fix. beginMission used to read m.brief where m is the
+       RUN record, so the banner printed the literal word "undefined". Assert the
+       banner text equals missionDefs()[idx].brief, not merely that it is set. --- */
+    try{
+      GS.mission=null;GS.brief=null;GS.briefT=0;C4C.job=0;
+      clearEnvelopeFlags();markersClear();
+      resetCityJobs();
+      var phb=null,i6;
+      for(i6=0;i6<PHONES.length;i6++)if(PHONES[i6].on){phb=PHONES[i6];break;}
+      if(!phb)C.briefFix={err:'no-phone-on',phones:PHONES.length};
+      else{
+        stage('play');C4C.die=0;P.inv=0;
+        GS.msg='SENTINEL';GS.msgT=0;
+        var wasOn=phb.on;/* openBrief() consumes the pickup, so read it first */
+        openBrief(phb);
+        var f6=0;
+        while(!GS.mission&&f6<480){step(1,null);f6++;}
+        var m6=GS.mission,def6=missionDefs(GS.city)[GS.missionIdx];
+        C.briefFix={phoneWasOn:wasOn,phoneAfter:phb.on,frames:f6,started:!!m6,
+          kind:m6?m6.kind:null,name:m6?m6.name:null,
+          msg:GS.msg,msgIsBrief:GS.msg===def6.brief,
+          saysUndefined:/undefined/.test(GS.msg+''),
+          briefText:def6.brief?def6.brief.slice(0,48):null,
+          bad:actorScan()};
+      }
+    }catch(e){C.briefFixErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+
+    /* --- 7. newGame(1) LAST: a full SAN ANDREAS rebuild through the chunk-5
+       transition chain (clearActors + buildCity + spawnPlayer + populateCity).
+       This is the first time city 1 has ever been built. It also leaves the city
+       that R.audit2 audits a different one from every earlier run, so audit2 is
+       deliberately not comparable to the chunk-4c baseline; R.newgame.statics is
+       the proof the rebuild really happened. --- */
+    try{
+      var pol=0,i7;
+      newGame(1);
+      for(i7=0;i7<VEH.length;i7++)if(VEH[i7].userData.role==='police')pol++;
+      C.newgame={th:TH.name,chapter:TH.chapter,city:GS.city,mode:GS.mode,
+        unlocked:HUDC.unlocked,sel:HUDC.sel,
+        veh:VEH.length,ped:PED.length,box:PARKBOX.length,phones:PHONES.length,
+        police:pol,statics:staticMeshes.length,plots:CITY.plots.length,
+        spawn:CITY.spawn.length,
+        score:GS.score,cash:GS.cash,lives:GS.lives,cityScore:GS.cityScore,
+        done:GS.done.length,ammo:GS.ammo.join('/'),wp:GS.wp,
+        big:GS.big,msg:GS.msg,fade:r1(GS.fade),
+        bad:actorScan(),fx:fxRep().on};
+    }catch(e){C.newgameErr=(e.message||e)+' | '+String(e.stack||'').split('\n')[1];}
+
+    R.c5=C;
   })();
   R.audit2=audit();
   R.per={frames:H.frames,ms:Date.now()-t0,msPerFrame:r1((Date.now()-t0)/Math.max(1,H.frames))};
