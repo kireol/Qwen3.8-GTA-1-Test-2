@@ -15,9 +15,9 @@ headless harness structurally cannot cover). No remote — nothing is pushed.
   · `audit0/audit2 bad:[]` · `nanTot` all 0 · `rsScan.n:0` · `render2:"ok"` · `per 0.51 ms/frame`.
 - The previous "CHECKPOINT — exact state if the session restarts right now" block (chunk 5
   unverified/uncommitted, `refs/wip/chunk5` as the recovery net, the pre-splice `/tmp` artifacts)
-  is **retired**: that tree is now committed, so `git show HEAD` *is* the recovery point.
-  `refs/wip/chunk5` → `0b68d96` is left in place but is fully reachable from `main` and can be
-  deleted with `git update-ref -d refs/wip/chunk5`.
+  is **retired**: that tree is now committed, so `git show HEAD:src/gta1.html` *is* the verified
+  game (the newest commit is a docs-only follow-up that leaves src and the harness untouched).
+  `refs/wip/chunk5` → `0b68d96` is left in place; see "Git" for what it still uniquely holds.
 - **What the harness cannot prove, and only a human can:** whether the thing is *fun* and looks
   right — driving feel, spawn density, the `PtPool` `ShaderMaterial` particles, the audio graph,
   HUD legibility at real DPR, `GS.fps` and frame pacing on a real GPU.
@@ -379,12 +379,15 @@ path) → `python3 /tmp/rd.py <keys>`. ~5 s of sim, 9663 frames, ~50 s wall.
 
 ## Git
 Branch `main`, identity `kireol / 3438792+kireol@users.noreply.github.com`, **no remote**.
-Recent: `450d6c3` **chunk 5** (HUD, map, screens, main loop, `boot()`, plus the 4 surgical
-src fixes), `7c03886` chunk 4c (weapons/wanted police/pickups/markers/missions), `53f78fc`
-boarding radius + throttle drag, `ba13cd0` NaN geometry + driving physics, `add6241`
-foot-velocity fix + island walls, `a4f538c` chunk 4b, `254dbcc` baseline (chunks 1–4a).
-`refs/wip/chunk5` → `0b68d96` is a now-redundant recovery net from before verification; safe to
-delete.
+Recent (newest first — hashes deliberately not quoted here, `git log -n 1` is authoritative):
+**chunk 5** (HUD, map, screens, main loop, `boot()`, plus the 4 surgical src fixes),
+`7c03886` chunk 4c (weapons/wanted police/pickups/markers/missions), `53f78fc` boarding radius +
+throttle drag, `ba13cd0` NaN geometry + driving physics, `add6241` foot-velocity fix + island
+walls, `a4f538c` chunk 4b, `254dbcc` baseline (chunks 1–4a).
+`refs/wip/chunk5` → `0b68d96` ("WIP on main: 7c03886") is the **pre-verification snapshot and is
+NOT an ancestor of main** (`git merge-base --is-ancestor` fails). Verified delta vs HEAD: exactly
+the `advanceCity()` cityScore fix in src, plus the 241-line `R.c5` harness block — i.e. it holds
+nothing unique, so `git update-ref -d refs/wip/chunk5` only discards the pre-fix variant.
 Every chunk staged **explicit paths only**: `src/gta1.html`, `tests/harness/mk_smoke.js`,
 `docs/agent/PROJECT_STATE.md`. **Never stage `tmp/` or `.qwen/skill-curator.json`**
 (pre-existing untracked scratch), never `git add -A`.
