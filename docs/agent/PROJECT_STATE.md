@@ -551,13 +551,18 @@ Every chunk staged **explicit paths only**: `src/index.html`, `tests/harness/mk_
   `mk_smoke.js`, `rd.py`, `three128.js`.
 
 ## Next action
-**Playtest-feedback round is committed (`08b812c`). README.md + the three `docs/images/` frames are
-committed next, then push to `https://github.com/kireol/Qwen3.8-GTA-1-Test-2` (user-authorized for
-that one URL). Push rule: fast-forward only — `git remote add origin` + `git fetch` first, and if the
-remote is non-empty and not an ancestor of HEAD, stop and report rather than force.** The things his
-eyes are still the only instrument for: whether `VIEWW:46` feels right at a real window size and DPR,
-whether the dark head material reads as a head, `GS.fps` on a real GPU, the `PtPool` look, and the
-audio graph.
+**Playtest-feedback round is committed (`08b812c`), and so are README.md + the three `docs/images/`
+frames (`9c95d2c`, pushed). Two README corrections from the user after that push: (1) THREE models
+built this, not two — primary **Qwen 3.8 Flash Next** (the model the reference README names) plus the
+2 × `Qwen3.6-35B-A3B-GGUF:UD-Q4_K_S` `--fast` pair; (2) this repo is a **follow-up** to
+[kireol/qwen3.8_GTA_one_shot_test](https://github.com/kireol/qwen3.8_GTA_one_shot_test), **not a
+fork** — no code, history or assets carried over; what is inherited is the method and the primary
+model, and 128K-vs-64K context remains the only setup change. Push rule for
+`https://github.com/kireol/Qwen3.8-GTA-1-Test-2` (user-authorized for that one URL): fast-forward
+only, never force; stop and report if the remote is non-empty and not an ancestor of HEAD.** The
+things his eyes are still the only instrument for: whether `VIEWW:46` feels right at a real window
+size and DPR, whether the dark head material reads as a head, `GS.fps` on a real GPU, the `PtPool`
+look, and the audio graph.
 The one known live bug to triage next is the **on-foot south escape** (`soak z:-11.21`) — it needs a
 physics diagnosis, not a guess, and it must be a separate commit. For any fix that touches physics
 or the world sim, re-run `sh tests/harness/run.sh … c5` and require the green gates **plus**
