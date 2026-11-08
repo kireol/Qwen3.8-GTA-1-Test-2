@@ -1,5 +1,5 @@
 const fs=require('fs');
-const SRC='$HOME/projects/gta1/src/index.html';
+const SRC=require('os').homedir()+'/projects/gta1/src/index.html';
 let s=fs.readFileSync(SRC,'utf8');
 const CDN='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
 if(s.indexOf(CDN)<0)throw new Error('CDN tag not found');
